@@ -1,0 +1,803 @@
+// test_dict.c — system.dic の辞書引きテスト（Mac 上）
+//
+//   ./test_dict           テスト 9 項目を自動実行
+//   ./test_dict -i        対話モード
+//
+// 辞書は可変長レコードなので、ファイル末尾のオフセットテーブル
+// （entry_count × uint32 LE）を介してバイナリサーチする。
+//
+// 前回位置再利用（hint_pos）は実装・検証してあるが、既定では使わない。
+// 実測でバイナリサーチの 10 倍以上シークするため（テスト項目 9 参照）。
+// 呼び出し側は hint_pos に -1 を渡すこと。
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+// ---------------------------------------------------------------------------
+// 辞書 API
+// ---------------------------------------------------------------------------
+
+#define DICT_MAGIC   "OPUR"
+#define DICT_VERSION 1
+#define HEADER_SIZE  16
+#define FIELD_MAX    256   // reading_len / surface_len は uint8 なので最大 255
+
+typedef struct {
+    FILE *fp;
+    uint32_t entry_count;
+    long table_offset;    // オフセットテーブルの先頭位置
+    long last_pos;        // 前回検索で見つかった位置（再利用用）
+    int last_result;      // 前回検索の結果（0=found, -1=not found）
+} OpurDict;
+
+typedef int (*DictHitCallback)(const char *reading, const char *surface, void *ctx);
+
+int  opur_dict_open(OpurDict *dict, const char *path);
+void opur_dict_close(OpurDict *dict);
+int  opur_dict_search(OpurDict *dict, const char *reading, long hint_pos,
+                      DictHitCallback cb, void *ctx);
+
+// 計測用（発注書のテスト項目 9）
+// hint 経路とバイナリサーチはコスト特性が全く違うので分けて数える。
+static long g_seeks = 0;
+static long g_searches = 0;
+static long g_hint_searches = 0, g_hint_seeks = 0;
+static long g_bs_searches = 0,   g_bs_seeks = 0;
+
+// ---------------------------------------------------------------------------
+// 低レベル入出力
+// ---------------------------------------------------------------------------
+
+static int read_exact(FILE *fp, void *buf, size_t n) {
+    return fread(buf, 1, n, fp) == n ? 0 : -1;
+}
+
+static int read_u8(FILE *fp, unsigned *out) {
+    unsigned char b;
+    if (read_exact(fp, &b, 1) != 0) return -1;
+    *out = b;
+    return 0;
+}
+
+static int read_u32le(FILE *fp, uint32_t *out) {
+    unsigned char b[4];
+    if (read_exact(fp, b, 4) != 0) return -1;
+    *out = (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+           ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+    return 0;
+}
+
+// i 番目のレコードの先頭バイト位置を、末尾のオフセットテーブルから引く。
+static long entry_offset(OpurDict *d, uint32_t i) {
+    uint32_t off;
+    if (fseek(d->fp, d->table_offset + (long)i * 4, SEEK_SET) != 0) return -1;
+    g_seeks++;
+    if (read_u32le(d->fp, &off) != 0) return -1;
+    return (long)off;
+}
+
+// pos のレコードを読む。次のレコードの位置を返す。失敗時 -1。
+// surface が不要なら sbuf に NULL を渡す（読み飛ばす）。
+static long read_record(OpurDict *d, long pos,
+                        char *rbuf, size_t *rlen,
+                        char *sbuf, size_t *slen) {
+    unsigned rn, sn;
+
+    if (fseek(d->fp, pos, SEEK_SET) != 0) return -1;
+    g_seeks++;
+
+    if (read_u8(d->fp, &rn) != 0) return -1;
+    if (read_exact(d->fp, rbuf, rn) != 0) return -1;
+    rbuf[rn] = '\0';
+    *rlen = rn;
+
+    if (read_u8(d->fp, &sn) != 0) return -1;
+    if (sbuf) {
+        if (read_exact(d->fp, sbuf, sn) != 0) return -1;
+        sbuf[sn] = '\0';
+        if (slen) *slen = sn;
+    } else {
+        if (fseek(d->fp, (long)sn, SEEK_CUR) != 0) return -1;
+    }
+
+    return pos + 1 + (long)rn + 1 + (long)sn;
+}
+
+// UTF-8 バイト列の辞書順比較。build_dict.py の
+// `entries.sort(key=lambda e: e[0].encode("utf-8"))` と同じ順序でなければならない。
+// Python の bytes 比較は「共通部分が同じなら短いほうが小さい」。
+static int bytecmp(const char *a, size_t alen, const char *b, size_t blen) {
+    size_t n = alen < blen ? alen : blen;
+    int c = memcmp(a, b, n);
+    if (c != 0) return c;
+    if (alen == blen) return 0;
+    return alen < blen ? -1 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// open / close
+// ---------------------------------------------------------------------------
+
+int opur_dict_open(OpurDict *dict, const char *path) {
+    char magic[4];
+    unsigned char ver[2];
+    long fsize;
+
+    memset(dict, 0, sizeof(*dict));
+    dict->last_pos = -1;
+    dict->last_result = -1;
+
+    dict->fp = fopen(path, "rb");
+    if (!dict->fp) return -1;
+
+    if (read_exact(dict->fp, magic, 4) != 0) return -1;
+    if (memcmp(magic, DICT_MAGIC, 4) != 0) return -2;
+    if (read_exact(dict->fp, ver, 2) != 0) return -1;
+    if ((ver[0] | (ver[1] << 8)) != DICT_VERSION) return -3;
+    if (read_u32le(dict->fp, &dict->entry_count) != 0) return -1;
+
+    if (fseek(dict->fp, 0, SEEK_END) != 0) return -1;
+    fsize = ftell(dict->fp);
+    dict->table_offset = fsize - (long)dict->entry_count * 4;
+    if (dict->table_offset < HEADER_SIZE) return -4;
+
+    return 0;
+}
+
+void opur_dict_close(OpurDict *dict) {
+    if (dict->fp) fclose(dict->fp);
+    dict->fp = NULL;
+}
+
+// ---------------------------------------------------------------------------
+// 検索
+// ---------------------------------------------------------------------------
+
+// target 以上の読みを持つ最初のレコードの index（lower_bound）。
+static uint32_t lower_bound(OpurDict *d, const char *target, size_t tlen) {
+    uint32_t lo = 0, hi = d->entry_count;
+    char rbuf[FIELD_MAX];
+    size_t rlen;
+
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        long pos = entry_offset(d, mid);
+        if (pos < 0) break;
+        if (read_record(d, pos, rbuf, &rlen, NULL, NULL) < 0) break;
+        if (bytecmp(rbuf, rlen, target, tlen) < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+// pos から読みが target と一致するレコードを順に返す。ヒット数を返す。
+static int emit_from(OpurDict *d, long pos, const char *target, size_t tlen,
+                     DictHitCallback cb, void *ctx) {
+    char rbuf[FIELD_MAX], sbuf[FIELD_MAX];
+    size_t rlen, slen;
+    int hits = 0;
+
+    while (pos >= 0 && pos < d->table_offset) {
+        long next = read_record(d, pos, rbuf, &rlen, sbuf, &slen);
+        if (next < 0) break;
+        if (bytecmp(rbuf, rlen, target, tlen) != 0) break;
+        if (hits == 0) d->last_pos = pos;
+        hits++;
+        if (cb && cb(rbuf, sbuf, ctx) != 0) break;
+        pos = next;
+    }
+    return hits;
+}
+
+int opur_dict_search(OpurDict *dict, const char *reading, long hint_pos,
+                     DictHitCallback cb, void *ctx) {
+    size_t tlen = strlen(reading);
+    char hbuf[FIELD_MAX];
+    size_t hlen;
+    int hits = -1;
+    long seeks0 = g_seeks;
+
+    g_searches++;
+
+    // --- 前回位置の再利用 ---
+    // ※ 既定では使わない経路。素のバイナリサーチのほうが速いと実測で判明した
+    //    （同一前方一致の読みが数百件並ぶ帯を線形走査するため。microSD では
+    //    シーク 1 回のコストが高いのでさらに不利）。
+    //    正しさは検証済みなので、将来インデックスを持たせたときの土台として残す。
+    //
+    // hint の読みが target の前方一致になっているときだけ使える。
+    // ソート済みなので、hint 位置から前方へ線形走査すれば必ず target の
+    // 位置に到達する（途中で target を追い越したらその読みは存在しない）。
+    if (hint_pos >= HEADER_SIZE && hint_pos < dict->table_offset) {
+        if (read_record(dict, hint_pos, hbuf, &hlen, NULL, NULL) >= 0) {
+            if (tlen >= hlen && memcmp(reading, hbuf, hlen) == 0) {
+                long pos = hint_pos;
+                char rbuf[FIELD_MAX];
+                size_t rlen;
+                hits = 0;
+                while (pos >= 0 && pos < dict->table_offset) {
+                    long next = read_record(dict, pos, rbuf, &rlen, NULL, NULL);
+                    int c;
+                    if (next < 0) break;
+                    c = bytecmp(rbuf, rlen, reading, tlen);
+                    if (c == 0) {
+                        hits = emit_from(dict, pos, reading, tlen, cb, ctx);
+                        break;
+                    }
+                    if (c > 0) break;   // 追い越した = 存在しない
+                    // ここに来るレコードは必ず hint の前方一致になっているはず。
+                    // 念のため確認し、外れていたらバイナリサーチにフォールバック。
+                    if (rlen < hlen || memcmp(rbuf, hbuf, hlen) != 0) {
+                        hits = -1;
+                        break;
+                    }
+                    pos = next;
+                }
+            }
+        }
+    }
+
+    if (hits >= 0) {
+        g_hint_searches++;
+        g_hint_seeks += g_seeks - seeks0;
+    }
+
+    // --- 通常のバイナリサーチ ---
+    if (hits < 0) {
+        uint32_t idx = lower_bound(dict, reading, tlen);
+        g_bs_searches++;
+        if (idx >= dict->entry_count) {
+            hits = 0;
+        } else {
+            long pos = entry_offset(dict, idx);
+            hits = (pos < 0) ? 0 : emit_from(dict, pos, reading, tlen, cb, ctx);
+        }
+        g_bs_seeks += g_seeks - seeks0;
+    }
+
+    dict->last_result = (hits > 0) ? 0 : -1;
+    if (hits == 0) dict->last_pos = -1;
+    return hits;
+}
+
+// ---------------------------------------------------------------------------
+// UTF-8 ユーティリティ
+// ---------------------------------------------------------------------------
+
+static int u8_is_cont(unsigned char c) { return (c & 0xC0) == 0x80; }
+
+static int u8_count(const char *s) {
+    int n = 0;
+    for (; *s; s++) if (!u8_is_cont((unsigned char)*s)) n++;
+    return n;
+}
+
+// 先頭から nchars 文字ぶんのバイト数
+static size_t u8_bytes(const char *s, int nchars) {
+    const char *p = s;
+    int n = 0;
+    while (*p) {
+        if (!u8_is_cont((unsigned char)*p)) {
+            if (n == nchars) break;
+            n++;
+        }
+        p++;
+    }
+    return (size_t)(p - s);
+}
+
+// ---------------------------------------------------------------------------
+// テスト用のヒット収集
+// ---------------------------------------------------------------------------
+
+#define MAX_HITS 512
+
+typedef struct {
+    char surface[MAX_HITS][FIELD_MAX];
+    int n;
+} HitList;
+
+static int collect(const char *reading, const char *surface, void *ctx) {
+    HitList *h = (HitList *)ctx;
+    (void)reading;
+    if (h->n < MAX_HITS) {
+        snprintf(h->surface[h->n], FIELD_MAX, "%s", surface);
+        h->n++;
+    }
+    return 0;
+}
+
+static int has_surface(const HitList *h, const char *want) {
+    int i;
+    for (i = 0; i < h->n; i++) {
+        if (strcmp(h->surface[i], want) == 0) return 1;
+    }
+    return 0;
+}
+
+static void print_some(const HitList *h, int max) {
+    int i;
+    for (i = 0; i < h->n && i < max; i++) {
+        printf("%s%s", i ? " " : "", h->surface[i]);
+    }
+    if (h->n > max) printf(" …他 %d 件", h->n - max);
+}
+
+// ---------------------------------------------------------------------------
+// テストフレームワーク
+// ---------------------------------------------------------------------------
+
+static int g_pass = 0, g_fail = 0;
+
+static void ok(const char *title, int cond) {
+    if (cond) g_pass++; else g_fail++;
+    printf("  [%s] %s\n", cond ? "PASS" : "FAIL", title);
+}
+
+static void eq_int(const char *title, long got, long want) {
+    int c = (got == want);
+    if (c) g_pass++; else g_fail++;
+    printf("  [%s] %-38s got=%ld  want=%ld\n", c ? "PASS" : "FAIL",
+           title, got, want);
+}
+
+// ---------------------------------------------------------------------------
+// 最長一致
+// ---------------------------------------------------------------------------
+
+// text の先頭から最長一致する読みを探す。見つかった文字数を返す（0 = なし）。
+static int longest_match(OpurDict *d, const char *text, HitList *out) {
+    int nchars = u8_count(text);
+    int L;
+    for (L = nchars; L >= 1; L--) {
+        char cand[FIELD_MAX];
+        size_t nb = u8_bytes(text, L);
+        if (nb >= FIELD_MAX) continue;
+        memcpy(cand, text, nb);
+        cand[nb] = '\0';
+        out->n = 0;
+        if (opur_dict_search(d, cand, -1, collect, out) > 0) return L;
+    }
+    out->n = 0;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// テスト本体
+// ---------------------------------------------------------------------------
+
+static void t1_open(OpurDict *d) {
+    printf("\n=== 1. 辞書オープン ===\n");
+    ok("magic / version が正しい", d->fp != NULL);
+    printf("  entry_count   : %u\n", d->entry_count);
+    printf("  table_offset  : %ld\n", d->table_offset);
+    ok("entry_count が 10 万以上", d->entry_count >= 100000);
+    ok("table_offset がヘッダより後ろ", d->table_offset > HEADER_SIZE);
+}
+
+static void t2_known_words(OpurDict *d) {
+    HitList h;
+    printf("\n=== 2. 既知の単語検索 ===\n");
+
+    h.n = 0;
+    opur_dict_search(d, "ある", -1, collect, &h);
+    printf("  ある → "); print_some(&h, 8); printf("  (計 %d)\n", h.n);
+    ok("「ある」に 有る がある", has_surface(&h, "有る"));
+    ok("「ある」に 在る がある", has_surface(&h, "在る"));
+
+    h.n = 0;
+    opur_dict_search(d, "にほんご", -1, collect, &h);
+    printf("  にほんご → "); print_some(&h, 8); printf("  (計 %d)\n", h.n);
+    ok("「にほんご」に 日本語 がある", has_surface(&h, "日本語"));
+
+    h.n = 0;
+    opur_dict_search(d, "きょう", -1, collect, &h);
+    printf("  きょう → "); print_some(&h, 8); printf("  (計 %d)\n", h.n);
+    ok("「きょう」に 今日 がある", has_surface(&h, "今日"));
+}
+
+static void t3_conjugation(OpurDict *d) {
+    HitList h;
+    printf("\n=== 3. 活用形検索 ===\n");
+
+    h.n = 0;
+    opur_dict_search(d, "たべる", -1, collect, &h);
+    printf("  たべる → "); print_some(&h, 8); printf("  (計 %d)\n", h.n);
+    ok("一段: 「たべる」に 食べる がある", has_surface(&h, "食べる"));
+
+    h.n = 0;
+    opur_dict_search(d, "たべ", -1, collect, &h);
+    ok("一段: 「たべ」に 食べ がある（連用形）", has_surface(&h, "食べ"));
+
+    // 五段・カ行イ音便の連用タ接続。辞書に入るのは語幹側の「かい → 書い」で、
+    // 「た」は助動詞として別エントリ（最長一致で かい + た に分かれる）。
+    h.n = 0;
+    opur_dict_search(d, "かい", -1, collect, &h);
+    printf("  かい → "); print_some(&h, 8); printf("  (計 %d)\n", h.n);
+    ok("五段イ音便: 「かい」に 書い がある", has_surface(&h, "書い"));
+
+    h.n = 0;
+    opur_dict_search(d, "かか", -1, collect, &h);
+    ok("五段: 「かか」に 書か がある（未然形）", has_surface(&h, "書か"));
+
+    h.n = 0;
+    opur_dict_search(d, "かけ", -1, collect, &h);
+    ok("五段: 「かけ」に 書け がある（仮定・命令）", has_surface(&h, "書け"));
+
+    // ipadic で「勉強」はサ変接続の名詞であって動詞ではない。サ変動詞として
+    // 活用型を持つのは「察する」など（活用型 サ変・−スル）のほう。
+    h.n = 0;
+    opur_dict_search(d, "さっし", -1, collect, &h);
+    printf("  さっし → "); print_some(&h, 8); printf("  (計 %d)\n", h.n);
+    ok("サ変: 「さっし」に 察し がある", has_surface(&h, "察し"));
+
+    h.n = 0;
+    opur_dict_search(d, "えんじ", -1, collect, &h);
+    ok("サ変−ズル: 「えんじ」に 演じ がある", has_surface(&h, "演じ"));
+
+    h.n = 0;
+    opur_dict_search(d, "し", -1, collect, &h);
+    ok("サ変: 「し」に する の連用形 し がある", has_surface(&h, "し"));
+
+    h.n = 0;
+    opur_dict_search(d, "こい", -1, collect, &h);
+    ok("カ変: 「こい」に 来い がある", has_surface(&h, "来い"));
+
+    h.n = 0;
+    opur_dict_search(d, "たかかっ", -1, collect, &h);
+    ok("形容詞: 「たかかっ」に 高かっ がある", has_surface(&h, "高かっ"));
+}
+
+static void t4_tankan(OpurDict *d) {
+    HitList h;
+    printf("\n=== 4. 単漢字検索 ===\n");
+
+    h.n = 0;
+    opur_dict_search(d, "あ", -1, collect, &h);
+    printf("  あ → "); print_some(&h, 12); printf("\n");
+    printf("  候補数: %d\n", h.n);
+    ok("「あ」に 亜 がある", has_surface(&h, "亜"));
+    ok("「あ」に 阿 がある", has_surface(&h, "阿"));
+    ok("「あ」の候補が 20 件以上", h.n >= 20);
+
+    h.n = 0;
+    opur_dict_search(d, "こう", -1, collect, &h);
+    printf("  こう の候補数: %d\n", h.n);
+    ok("「こう」の候補が 100 件以上", h.n >= 100);
+}
+
+static void t5_longest(OpurDict *d) {
+    const char *text = "きょうはいいてんきです";
+    char rest[512];
+    int guard = 0;
+
+    printf("\n=== 5. 最長一致テスト ===\n");
+    printf("  入力: %s\n", text);
+
+    snprintf(rest, sizeof(rest), "%s", text);
+    while (rest[0] && guard++ < 32) {
+        HitList h;
+        int n = longest_match(d, rest, &h);
+        size_t nb;
+        if (n == 0) {
+            nb = u8_bytes(rest, 1);
+            printf("    %.*s → (なし)\n", (int)nb, rest);
+        } else {
+            nb = u8_bytes(rest, n);
+            printf("    %.*s → ", (int)nb, rest);
+            print_some(&h, 5);
+            printf("\n");
+        }
+        memmove(rest, rest + nb, strlen(rest + nb) + 1);
+    }
+    ok("最長一致が最後まで進んだ", rest[0] == '\0');
+}
+
+static void t6_hint(OpurDict *d) {
+    HitList a, b;
+    long p1, p2;
+    int n_a, n_b, i, same;
+
+    printf("\n=== 6. 前回位置再利用 ===\n");
+    printf("  （既定では使わない経路。ここでは正しさだけを検証する）\n");
+
+    // 「あ」→ 位置を保存
+    a.n = 0;
+    opur_dict_search(d, "あ", -1, collect, &a);
+    p1 = d->last_pos;
+    printf("  「あ」の last_pos = %ld\n", p1);
+
+    // 「あい」を hint あり / なしで引いて一致するか
+    a.n = 0; n_a = opur_dict_search(d, "あい", p1, collect, &a);
+    b.n = 0; n_b = opur_dict_search(d, "あい", -1, collect, &b);
+    eq_int("「あい」 hint あり/なしのヒット数", n_a, n_b);
+    same = (a.n == b.n);
+    for (i = 0; same && i < a.n; i++) {
+        if (strcmp(a.surface[i], b.surface[i]) != 0) same = 0;
+    }
+    ok("「あい」 hint あり/なしの候補が同一", same);
+
+    // 「あい」→「あいう」と伸ばす
+    a.n = 0; opur_dict_search(d, "あい", -1, collect, &a);
+    p2 = d->last_pos;
+    a.n = 0; n_a = opur_dict_search(d, "あいう", p2, collect, &a);
+    b.n = 0; n_b = opur_dict_search(d, "あいう", -1, collect, &b);
+    eq_int("「あいう」 hint あり/なしのヒット数", n_a, n_b);
+    same = (a.n == b.n);
+    for (i = 0; same && i < a.n; i++) {
+        if (strcmp(a.surface[i], b.surface[i]) != 0) same = 0;
+    }
+    ok("「あいう」 hint あり/なしの候補が同一", same);
+    printf("  あいう → "); print_some(&a, 6); printf("  (計 %d)\n", a.n);
+
+    // 前方一致でない hint を渡してもフォールバックして正しく引ける
+    a.n = 0; n_a = opur_dict_search(d, "とうきょう", p1, collect, &a);
+    b.n = 0; n_b = opur_dict_search(d, "とうきょう", -1, collect, &b);
+    eq_int("無関係な hint でもフォールバックする", n_a, n_b);
+    ok("「とうきょう」に 東京 がある", has_surface(&b, "東京"));
+
+    // 存在しない読みを hint 経由で引いても 0 件になる
+    a.n = 0;
+    n_a = opur_dict_search(d, "あzzz", p1, collect, &a);
+    eq_int("hint 経由でも存在しない読みは 0 件", n_a, 0);
+
+    // --- 網羅チェック: 辞書全体から等間隔にサンプリングして hint あり/なしを比較 ---
+    {
+        const int kSamples = 300;
+        uint32_t step = d->entry_count / (uint32_t)kSamples;
+        uint32_t k;
+        int mismatch = 0, checked = 0, hint_used = 0;
+
+        for (k = 0; k < d->entry_count && checked < kSamples; k += step) {
+            char rbuf[FIELD_MAX], pbuf[FIELD_MAX];
+            size_t rlen;
+            long pos = entry_offset(d, k);
+            long hp;
+            size_t nb;
+            int with, without;
+
+            if (pos < 0) break;
+            if (read_record(d, pos, rbuf, &rlen, NULL, NULL) < 0) break;
+            if (u8_count(rbuf) < 2) continue;   // 伸長できない読みは飛ばす
+
+            // 先頭 1 文字で引いた位置を hint にして、元の読みを引く
+            nb = u8_bytes(rbuf, 1);
+            memcpy(pbuf, rbuf, nb);
+            pbuf[nb] = '\0';
+
+            a.n = 0;
+            if (opur_dict_search(d, pbuf, -1, collect, &a) <= 0) continue;
+            hp = d->last_pos;
+
+            a.n = 0; with    = opur_dict_search(d, rbuf, hp, collect, &a);
+            b.n = 0; without = opur_dict_search(d, rbuf, -1, collect, &b);
+
+            checked++;
+            if (hp >= 0) hint_used++;
+            if (with != without || a.n != b.n) { mismatch++; continue; }
+            for (i = 0; i < a.n; i++) {
+                if (strcmp(a.surface[i], b.surface[i]) != 0) { mismatch++; break; }
+            }
+        }
+        printf("  サンプリング検証: %d 件（うち hint 使用 %d 件）\n",
+               checked, hint_used);
+        ok("全サンプルで hint あり/なしの結果が一致", mismatch == 0);
+        ok("サンプルが十分な件数ある", checked >= 200);
+    }
+}
+
+static void t7_missing(OpurDict *d) {
+    HitList h;
+    printf("\n=== 7. 存在しない読み ===\n");
+
+    h.n = 0;
+    eq_int("zzz", opur_dict_search(d, "zzz", -1, collect, &h), 0);
+    h.n = 0;
+    eq_int("ぬんぬんぬん", opur_dict_search(d, "ぬんぬんぬん", -1, collect, &h), 0);
+    ok("not found のとき last_result = -1", d->last_result == -1);
+}
+
+static void t8_edges(OpurDict *d) {
+    char rbuf[FIELD_MAX], sbuf[FIELD_MAX];
+    size_t rlen, slen;
+    long pos;
+    HitList h;
+
+    printf("\n=== 8. 先頭・末尾エントリ ===\n");
+
+    pos = entry_offset(d, 0);
+    ok("先頭レコードが読める", read_record(d, pos, rbuf, &rlen, sbuf, &slen) > 0);
+    printf("  先頭: %s → %s\n", rbuf, sbuf);
+    h.n = 0;
+    ok("先頭エントリを検索で引ける",
+       opur_dict_search(d, rbuf, -1, collect, &h) > 0 && has_surface(&h, sbuf));
+
+    pos = entry_offset(d, d->entry_count - 1);
+    ok("末尾レコードが読める", read_record(d, pos, rbuf, &rlen, sbuf, &slen) > 0);
+    printf("  末尾: %s → %s\n", rbuf, sbuf);
+    h.n = 0;
+    ok("末尾エントリを検索で引ける",
+       opur_dict_search(d, rbuf, -1, collect, &h) > 0 && has_surface(&h, sbuf));
+}
+
+// 実際の FEP の使い方（1 文字ずつ伸ばし、hint は直前の読みの位置）でのコスト。
+// サンプリング検証で使った「hint = 先頭 1 文字」は最悪ケースにあたる。
+static void bench_incremental(OpurDict *d) {
+    const int kSamples = 300;
+    uint32_t step = d->entry_count / (uint32_t)kSamples;
+    uint32_t k;
+    int checked = 0;
+    long hint_seeks = 0, bs_seeks = 0;
+    HitList h;
+
+    printf("\n  --- 伸長入力の実測（hint = 直前の読み = 1 文字短い）---\n");
+
+    for (k = 0; k < d->entry_count && checked < kSamples; k += step) {
+        char rbuf[FIELD_MAX], pbuf[FIELD_MAX];
+        size_t rlen, nb;
+        long pos = entry_offset(d, k);
+        long hp, s0;
+        int nchars;
+
+        if (pos < 0) break;
+        if (read_record(d, pos, rbuf, &rlen, NULL, NULL) < 0) break;
+        nchars = u8_count(rbuf);
+        if (nchars < 2) continue;
+
+        nb = u8_bytes(rbuf, nchars - 1);      // 末尾 1 文字を落とした読み
+        memcpy(pbuf, rbuf, nb);
+        pbuf[nb] = '\0';
+
+        h.n = 0;
+        if (opur_dict_search(d, pbuf, -1, collect, &h) <= 0) continue;
+        hp = d->last_pos;
+
+        s0 = g_seeks;
+        h.n = 0; opur_dict_search(d, rbuf, hp, collect, &h);
+        hint_seeks += g_seeks - s0;
+
+        s0 = g_seeks;
+        h.n = 0; opur_dict_search(d, rbuf, -1, collect, &h);
+        bs_seeks += g_seeks - s0;
+
+        checked++;
+    }
+
+    printf("    サンプル数        : %d\n", checked);
+    if (checked > 0) {
+        printf("    hint あり         : 平均 %.1f シーク\n",
+               (double)hint_seeks / checked);
+        printf("    hint なし         : 平均 %.1f シーク\n",
+               (double)bs_seeks / checked);
+        printf("\n");
+        if (hint_seeks >= bs_seeks) {
+            printf("    ★ hint 経路のほうが高い。同じ前方一致を持つ読みが\n");
+            printf("       数百件ある帯を線形に走査するため。バイナリサーチは\n");
+            printf("       log2(%u) ≒ %d ステップで済む。\n",
+                   d->entry_count, (int)(31 - __builtin_clz(d->entry_count)));
+            printf("       → hint 再利用は現状の辞書構成では効果がない。\n");
+            printf("          判断はマスター／エルマーに委ねる（発注書の項目6は\n");
+            printf("          「結果が一致すること」までを要求しており、それは PASS）。\n");
+        }
+    }
+}
+
+static OpurDict *g_dict = NULL;
+
+static void t9_stats(void) {
+    printf("\n=== 9. 統計 ===\n");
+    printf("  検索回数            : %ld\n", g_searches);
+    printf("  総シーク回数        : %ld\n", g_seeks);
+    printf("  平均シーク回数      : %.1f / 検索\n",
+           g_searches ? (double)g_seeks / (double)g_searches : 0.0);
+    printf("\n  経路別:\n");
+    printf("    バイナリサーチ    : %ld 回, 平均 %.1f シーク\n", g_bs_searches,
+           g_bs_searches ? (double)g_bs_seeks / (double)g_bs_searches : 0.0);
+    printf("    hint 線形走査     : %ld 回, 平均 %.1f シーク\n", g_hint_searches,
+           g_hint_searches ? (double)g_hint_seeks / (double)g_hint_searches : 0.0);
+    printf("\n  ※ hint 経路は「前回位置から前方一致が切れるまで線形走査」する。\n");
+    printf("     上の数字は hint = 先頭 1 文字（最悪ケース）のもの。\n");
+    printf("     実際の FEP の使い方での実測は下記。\n");
+    ok("検索が実行されている", g_searches > 0);
+    bench_incremental(g_dict);
+    ok("バイナリサーチは O(log N) に収まる",
+       g_bs_searches == 0 || (double)g_bs_seeks / (double)g_bs_searches < 100.0);
+}
+
+// ---------------------------------------------------------------------------
+// 対話モード
+// ---------------------------------------------------------------------------
+
+static int print_hit(const char *reading, const char *surface, void *ctx) {
+    int *n = (int *)ctx;
+    (void)reading;
+    printf("[%d] %s\n", ++(*n), surface);
+    return (*n >= 30) ? 1 : 0;   // 表示は 30 件まで
+}
+
+static void interactive(OpurDict *d) {
+    char line[512];
+
+    printf("辞書引き対話モード（quit で終了）\n");
+    for (;;) {
+        char *nl;
+        int n = 0;
+
+        printf("dict> ");
+        fflush(stdout);
+        if (!fgets(line, sizeof(line), stdin)) break;
+        nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        if (line[0] == '\0') continue;
+        if (strcmp(line, "quit") == 0 || strcmp(line, "exit") == 0) break;
+
+        if (opur_dict_search(d, line, -1, print_hit, &n) > 0) continue;
+
+        // 完全一致しなければ最長一致で分割する
+        {
+            char rest[512];
+            int guard = 0;
+            snprintf(rest, sizeof(rest), "%s", line);
+            while (rest[0] && guard++ < 64) {
+                HitList h;
+                int m = longest_match(d, rest, &h);
+                size_t nb;
+                if (m == 0) {
+                    nb = u8_bytes(rest, 1);
+                    printf("最長一致: %.*s → (なし)\n", (int)nb, rest);
+                } else {
+                    nb = u8_bytes(rest, m);
+                    printf("最長一致: %.*s → [", (int)nb, rest);
+                    print_some(&h, 8);
+                    printf("]\n");
+                }
+                memmove(rest, rest + nb, strlen(rest + nb) + 1);
+                if (rest[0]) printf("残り: %s\n", rest);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+int main(int argc, char **argv) {
+    OpurDict d;
+    const char *path = "output/system.dic";
+    int rc;
+
+    if (argc >= 3 && strcmp(argv[1], "-d") == 0) path = argv[2];
+
+    rc = opur_dict_open(&d, path);
+    if (rc != 0) {
+        fprintf(stderr, "辞書を開けない: %s (rc=%d)\n", path, rc);
+        fprintf(stderr, "  make build-dict を先に実行して\n");
+        return 1;
+    }
+
+    if (argc >= 2 && strcmp(argv[1], "-i") == 0) {
+        interactive(&d);
+        opur_dict_close(&d);
+        return 0;
+    }
+
+    printf("=== system.dic 辞書引きテスト ===\n");
+    printf("辞書: %s\n", path);
+
+    t1_open(&d);
+    t2_known_words(&d);
+    t3_conjugation(&d);
+    t4_tankan(&d);
+    t5_longest(&d);
+    t6_hint(&d);
+    t7_missing(&d);
+    t8_edges(&d);
+    g_dict = &d;
+    t9_stats();
+
+    printf("\n---- %d passed, %d failed ----\n", g_pass, g_fail);
+
+    opur_dict_close(&d);
+    return (g_fail == 0) ? 0 : 1;
+}

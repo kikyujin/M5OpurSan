@@ -13,5 +13,14 @@ opur_editor/*.o
 opur_editor/opur_editor
 opur_editor/test_editor
 
+# dict_tools: 辞書素材の clone と生成物（どちらも make で再生成できる）
+dict_tools/natume/
+dict_tools/output/
+dict_tools/test_dict
+
 # macOS
 .DS_Store
+
+# Python のキャッシュ
+__pycache__/
+*.pyc
