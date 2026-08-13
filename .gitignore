@@ -8,5 +8,10 @@
 fep/*.o
 fep/test_fep
 
+# opur_editor のビルド生成物
+opur_editor/*.o
+opur_editor/opur_editor
+opur_editor/test_editor
+
 # macOS
 .DS_Store
