@@ -11,6 +11,7 @@
 //   ---      1px の仕切り線（m5curses が行の隙間として持っている）
 //   行 6     FEP 入力行（未確定なので下線）
 //   行 7     候補バー（選択中の候補だけ反転。PC 版と同じ）
+//            候補バーが出ていないときは、右端 5 桁に時計を出す
 //
 // PC 版にあった枠線とステータスバーは無い。実機は 8 行しか無いので、
 // 枠を描くと本文が入らない。本文との区切りは仕切り線が受け持つ。
@@ -19,6 +20,8 @@
 
 #include "m5curses.h"
 #include "utf8_utf16.h"
+
+#include <time.h>
 
 // 本文 1 行ぶんの UTF-8 バッファ。30 半角 = 最大 30 文字、全角は 3 バイトなので 90。
 #define LINE_U8_MAX 128
@@ -202,12 +205,41 @@ static void draw_cand(const CandBar* bar) {
 }
 
 // ---------------------------------------------------------------------------
+// 時計
+// ---------------------------------------------------------------------------
+//
+// 候補バーが出ていないとき、行 7 の右端 5 桁に "HH:MM" を出す。
+// 候補バーは右端まで伸びうるので、出ているときは譲る。
+//
+// 時刻は NTP で合わせている（opur_wifi.c）。合っていなければ 1970 年が
+// 返るので、そのときは何も出さない。嘘の時刻を出すより無いほうがいい。
+//
+// 再描画は loop() が回るたび。無操作でも getch() が 3 秒で ERR を返して
+// 一巡するので、分の変わり目からは最大 3 秒遅れで追いつく。
+
+#define CLOCK_COLS 5
+
+static void draw_clock(void) {
+    time_t     now = time(NULL);
+    struct tm  t;
+    char       buf[8];
+
+    localtime_r(&now, &t);
+
+    if (t.tm_year <= (2016 - 1900)) return;   // 未同期
+
+    strftime(buf, sizeof(buf), "%H:%M", &t);
+    mvaddstr(ROW_CAND, OPUR_COLS - CLOCK_COLS, buf);
+}
+
+// ---------------------------------------------------------------------------
 // メニュー
 // ---------------------------------------------------------------------------
 
 // 下 2 行を上書きする。本文（行 0-5）はそのまま残す。
 static void draw_menu(void) {
-    mvaddstr(ROW_FEP,  0, "[1.保存  2.新規]");
+    // 22 半角桁。30 桁に収まる。
+    mvaddstr(ROW_FEP,  0, "[1.保存 2.新規 3.ログ]");
     mvaddstr(ROW_CAND, 0, "ESC:戻る");
 }
 
@@ -233,7 +265,8 @@ void view_draw(const OpurEditor* ed,
         draw_menu();
     } else {
         draw_fep(fep_buf, fep_len);
-        draw_cand(bar);
+        if (bar) draw_cand(bar);
+        else     draw_clock();      // 候補バーが出ていないときだけ
     }
 
     m5c_separator();

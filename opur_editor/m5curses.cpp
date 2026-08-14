@@ -264,6 +264,19 @@ int m5c_nvs_ready(void) {
     return g_nvs_ok ? 1 : 0;
 }
 
+int m5c_nvs_reset(void) {
+    // deinit してから消す。開いたままの erase は許されない。
+    nvs_flash_deinit();
+
+    if (nvs_flash_erase() != ESP_OK) {
+        g_nvs_ok = false;
+        return 0;
+    }
+
+    g_nvs_ok = (nvs_flash_init() == ESP_OK);
+    return g_nvs_ok ? 1 : 0;
+}
+
 // ---------------------------------------------------------------------------
 
 void timeout(int ms) {
