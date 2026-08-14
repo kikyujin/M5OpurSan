@@ -31,10 +31,13 @@ void view_too_small(void);
 //   fep_buf / fep_len : 未確定の FEP バッファ（かな + ローマ字途中の混在）。
 //                       fep_len が 0 なら FEP 入力行は空になる。
 //   bar               : 候補選択中なら CandBar、そうでなければ NULL。
+//   show_menu         : 非 0 なら下 2 行をメニューで上書きする。
+//                       本文はそのまま見えている（暗転しない）。
 // 最後にカーソルを本文側の位置へ置くので、FEP 入力中も本文カーソルが見える。
 void view_draw(const OpurEditor* ed,
                const uint16_t* fep_buf, int fep_len,
-               const CandBar* bar);
+               const CandBar* bar,
+               int show_menu);
 
 #ifdef __cplusplus
 }  // extern "C"

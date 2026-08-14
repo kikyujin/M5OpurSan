@@ -202,10 +202,21 @@ static void draw_cand(const CandBar* bar) {
 }
 
 // ---------------------------------------------------------------------------
+// メニュー
+// ---------------------------------------------------------------------------
+
+// 下 2 行を上書きする。本文（行 0-5）はそのまま残す。
+static void draw_menu(void) {
+    mvaddstr(ROW_FEP,  0, "[1.保存  2.新規]");
+    mvaddstr(ROW_CAND, 0, "ESC:戻る");
+}
+
+// ---------------------------------------------------------------------------
 
 void view_draw(const OpurEditor* ed,
                const uint16_t* fep_buf, int fep_len,
-               const CandBar* bar) {
+               const CandBar* bar,
+               int show_menu) {
     OpurLayout* const lay = &g_lay;
     int cur_line, cur_col;
 
@@ -217,8 +228,13 @@ void view_draw(const OpurEditor* ed,
 
     draw_text(ed, lay);
     draw_cursor(ed, lay, cur_line, cur_col);
-    draw_fep(fep_buf, fep_len);
-    draw_cand(bar);
+
+    if (show_menu) {
+        draw_menu();
+    } else {
+        draw_fep(fep_buf, fep_len);
+        draw_cand(bar);
+    }
 
     m5c_separator();
 

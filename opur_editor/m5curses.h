@@ -94,6 +94,10 @@ void m5c_separator(void);
 // SD がマウントできていれば 1。initscr() のあとで意味を持つ。
 int m5c_sd_ready(void);
 
+// NVS（内蔵 Flash の不揮発領域）が使えれば 1。initscr() の中で初期化する。
+// 実際の読み書きは呼び出し側が ESP-IDF の nvs API で行う。
+int m5c_nvs_ready(void);
+
 // 属性のオン・オフ。
 //   A_REVERSE   前景色と背景色を入れ替える
 //   A_UNDERLINE 描いた文字列の下端に 1px の水平線を引く
@@ -113,7 +117,18 @@ void attroff(int attrs);
 //
 // 押しっぱなしでは繰り返さない（キーリピートは未実装）。
 // Ctrl+英字 は生成しない —— 実機では ESC でメニューに入る仕様のため不要。
+//
+// timeout() を設定していれば、待ち時間を過ぎたときに ERR を返す。
 int getch(void);
+
+// getch() の待ち方を決める（ncurses の timeout と同じ）。
+//   ms <  0   入力があるまで待つ（既定）
+//   ms == 0   待たない。無ければすぐ ERR
+//   ms >  0   ms ミリ秒待って無ければ ERR
+//
+// ERR を返すのは「本当に何も来ていないとき」だけで、
+// 溜まっているキーがあれば待ち時間に関係なく先に返す。
+void timeout(int ms);
 
 #ifdef __cplusplus
 }  // extern "C"

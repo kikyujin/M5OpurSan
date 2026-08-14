@@ -326,6 +326,29 @@ static void t5_build(void) {
     n = cand_bar_start(&g_bar, "ぬんぬんぬん");
     eq_int("辞書ヒット 0 でも 4 件", n, 4);
     eq_int("辞書候補は 0 件", g_bar.dict_count, 0);
+    eq_int("辞書候補が無ければ選択は 0（ひらがな）",
+           cand_bar_selected(&g_bar), 0);
+
+    // 初期選択は辞書の第 1 候補。ひらがなから始めない
+    cand_bar_start(&g_bar, "きょう");
+    eq_int("初期選択は 1（辞書の第 1 候補）", cand_bar_selected(&g_bar), 1);
+    ok("初期選択はひらがなではない",
+       strcmp(cand_bar_text(&g_bar, cand_bar_selected(&g_bar)), "きょう") != 0);
+
+    // 初期選択が画面外に出ていない（ensure_visible が効いている）
+    {
+        CandRender r;
+        cand_bar_render(&g_bar, &r);
+        ok("初期選択が画面内にある",
+           r.first <= cand_bar_selected(&g_bar) &&
+           cand_bar_selected(&g_bar) <= r.last);
+        ok("選択候補に幅がついている", r.sel_width > 0);
+    }
+
+    // 左キーでひらがなに戻れる（0 番が消えたわけではない）
+    eq_int("左キーで 0 番へ", cand_bar_key(&g_bar, CAND_KEY_LEFT), CAND_UPDATED);
+    eq_int("0 番はひらがなのまま", cand_bar_selected(&g_bar), 0);
+    eq_str("0 番の中身", cand_bar_text(&g_bar, 0), "きょう");
 
     // 辞書に「キョウ」があるので、放っておくとカタカナ候補と二重に並ぶ
     cand_bar_start(&g_bar, "きょう");

@@ -13,6 +13,10 @@
 //   N+1      : カタカナ
 //   N+2      : 全角英字
 //   N+3      : 半角英字
+//
+// cand_bar_start() 直後の選択は 1 番（辞書の第 1 候補）。
+// 変換したいのはたいてい漢字なので、0 番から始めると必ず 1 回余計に
+// キーを押すことになる。辞書候補が 1 件も無いときだけ 0 番になる。
 
 #ifndef OPUR_CANDIDATE_BAR_H_INCLUDED
 #define OPUR_CANDIDATE_BAR_H_INCLUDED

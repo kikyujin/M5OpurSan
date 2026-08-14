@@ -135,8 +135,9 @@ int main(void) {
         VKEY key;
 
         if (view_fits()) {
+            // PC 版にメニューは無い（終了は Ctrl+Q）。実機のみ 0 以外になる。
             view_draw(&g_ed, pending, pending_len,
-                      (mode == MODE_SELECT) ? &g_bar : NULL);
+                      (mode == MODE_SELECT) ? &g_bar : NULL, 0);
         } else {
             view_too_small();
         }

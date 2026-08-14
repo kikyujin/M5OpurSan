@@ -220,9 +220,16 @@ static void draw_cand(const CandBar* bar) {
 
 // ---------------------------------------------------------------------------
 
+// 下 2 行を上書きする。本文はそのまま残す（view_m5.c と同じ見た目）。
+static void draw_menu(void) {
+    mvaddstr(ROW_FEP,  BOX_X + 1, "[1.保存  2.新規]");
+    mvaddstr(ROW_CAND, BOX_X + 1, "ESC:戻る");
+}
+
 void view_draw(const OpurEditor* ed,
                const uint16_t* fep_buf, int fep_len,
-               const CandBar* bar) {
+               const CandBar* bar,
+               int show_menu) {
     OpurLayout lay;
     char status[80];
     int cur_line, cur_col;
@@ -236,8 +243,12 @@ void view_draw(const OpurEditor* ed,
     // 中身を先に描き、あとから枠を重ねる。
     // ◀▶ の実幅が端末では 2 桁になるので、はみ出したぶんは枠の縦線で潰れる。
     draw_text(ed, &lay);
-    draw_fep(fep_buf, fep_len);
-    if (bar) draw_cand(bar);
+    if (show_menu) {
+        draw_menu();
+    } else {
+        draw_fep(fep_buf, fep_len);
+        if (bar) draw_cand(bar);
+    }
 
     draw_frame();
 

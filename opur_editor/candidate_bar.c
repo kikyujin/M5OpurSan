@@ -324,6 +324,12 @@ int cand_bar_start(CandBar *bar, const char *reading_utf8) {
     if (bar->conv.to_fullwidth) add_item(bar, full, 0, 1);
     if (bar->conv.to_halfwidth) add_item(bar, half, 0, 1);
 
+    // 初期選択は辞書の第 1 候補（1 番）。変換したいのはたいてい漢字なので、
+    // ひらがな（0 番）から始めると必ず 1 回余計にキーを押すことになる。
+    // 辞書候補が 1 件も無いときだけ 0 番に落とす。
+    bar->sel = (bar->dict_count > 0) ? 1 : 0;
+    ensure_visible(bar);
+
     return bar->count;
 }
 

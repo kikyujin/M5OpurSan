@@ -10,6 +10,7 @@
 #include <M5Cardputer.h>
 #include <SD.h>
 #include <SPI.h>
+#include <nvs_flash.h>
 
 // M5Cardputer の Keyboard_def.h は KEY_LEFT / KEY_ENTER などを
 // **USB HID のスキャンコード**として定義している（KEY_LEFT = 0x50 など）。
@@ -40,7 +41,8 @@ constexpr uint16_t kBg = TFT_BLACK;
 
 int g_attrs = A_NORMAL;
 
-bool g_sd_ok = false;
+bool g_sd_ok  = false;
+bool g_nvs_ok = false;
 
 inline uint16_t fg() { return (g_attrs & A_REVERSE) ? kBg : kFg; }
 inline uint16_t bg() { return (g_attrs & A_REVERSE) ? kFg : kBg; }
@@ -79,6 +81,19 @@ void initscr(void) {
     M5Cardputer.begin(cfg, true);
 
     g_sd_ok = mount_sd();
+
+    // NVS（内蔵 Flash の小さな不揮発領域）。書きかけの自動退避に使う。
+    // パーティションが壊れている / 新しい版で埋まっている場合は
+    // 消してからやり直す。ここで失敗しても表示は続けたいので戻り値は捨てる。
+    {
+        esp_err_t err = nvs_flash_init();
+        if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+            err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            nvs_flash_erase();
+            err = nvs_flash_init();
+        }
+        g_nvs_ok = (err == ESP_OK);
+    }
 
     auto &d = M5Cardputer.Display;
     d.setRotation(1);              // 240x135 の横向き
@@ -179,6 +194,8 @@ int g_prev_n = 0;
 int g_pend[kKeysMax];           // 未返却のキー（同時押しを取りこぼさないため）
 int g_pend_n = 0;
 
+int g_timeout_ms = -1;          // <0 = 入力があるまで待つ
+
 // 今押されているキーを curses のコードに直して out に集める。個数を返す。
 int scan_keys(int *out) {
     const auto &st = M5Cardputer.Keyboard.keysState();
@@ -222,11 +239,21 @@ int m5c_sd_ready(void) {
     return g_sd_ok ? 1 : 0;
 }
 
+int m5c_nvs_ready(void) {
+    return g_nvs_ok ? 1 : 0;
+}
+
 // ---------------------------------------------------------------------------
 
+void timeout(int ms) {
+    g_timeout_ms = ms;
+}
+
 int getch(void) {
+    const uint32_t start = millis();
+
     for (;;) {
-        // 溜まっているものがあれば先に返す
+        // 溜まっているものがあれば待ち時間に関係なく先に返す
         if (g_pend_n > 0) {
             const int c = g_pend[0];
             for (int i = 1; i < g_pend_n; i++) g_pend[i - 1] = g_pend[i];
@@ -250,6 +277,14 @@ int getch(void) {
         for (int i = 0; i < n; i++) g_prev[i] = cur[i];
         g_prev_n = n;
 
-        if (g_pend_n == 0) delay(kPollMs);
+        if (g_pend_n > 0) continue;   // 積めた。次の周回で返す
+
+        if (g_timeout_ms == 0) return ERR;
+        // 引き算は uint32_t なので millis() が一周しても正しく効く
+        if (g_timeout_ms > 0 && (millis() - start) >= (uint32_t)g_timeout_ms) {
+            return ERR;
+        }
+
+        delay(kPollMs);
     }
 }
