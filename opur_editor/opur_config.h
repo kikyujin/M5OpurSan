@@ -8,11 +8,11 @@
 // 逆向き（送信処理が opur_wifi.h 経由で設定を引く）にはしない。
 //
 // フォーマット（実機の SD にあるものと同じ）:
-//   WIFI_SSID=ASUS_80
+//   WIFI_SSID=MyWiFi
 //   WIFI_PASS=xxxxx
-//   OPUR_HOST=192.168.50.137
+//   OPUR_HOST=192.168.1.100
 //   OPUR_PORT=9500
-//   DANTONG_HOST=192.168.50.133
+//   DANTONG_HOST=192.168.1.101
 //   DANTONG_PORT=9201
 
 #ifndef OPUR_CONFIG_H_INCLUDED

@@ -49,7 +49,7 @@ int opur_wifi_ntp_sync(void);
 // 一度でも同期できていれば 1。
 int opur_wifi_ntp_synced(void);
 
-// 自分の IP を "192.168.50.7" の形で返す。未接続なら "0.0.0.0"。
+// 自分の IP を "192.168.1.23" の形で返す。未接続なら "0.0.0.0"。
 // 戻り値は内部の静的バッファ。次の呼び出しで上書きされる。
 const char *opur_wifi_ip(void);
 

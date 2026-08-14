@@ -1,0 +1,16 @@
+# M5OpurSan config — microSD のルートに config.txt という名前で置く
+#
+# WiFi はオプション。この設定が無くても日本語入力・編集・SD 保存は
+# すべてオフラインで動く。
+#
+# 書式:
+#   KEY=VALUE の 1 行 1 項目。'#' から行末はコメント。空行は無視。
+#   '=' の前後の空白は無視。知らないキーは黙って読み飛ばす。
+#
+# 注意:
+#   アクセスポイントは WPA2-PSK 専用モードにすること。
+#   WPA2/WPA3 混在モードでは ESP32-S3 が接続できない。
+#   2.4GHz のみ対応（5GHz には繋がらない）。
+
+WIFI_SSID=MyWiFi
+WIFI_PASS=your-passphrase

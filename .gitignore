@@ -20,6 +20,15 @@ dict_tools/output/
 dict_tools/*.o
 dict_tools/test_dict
 
+# 公開しないもの
+# .claude/          ローカルの権限設定。絶対パス等の環境情報が残る
+# config.txt        実機 SD 用の設定。SSID とパスフレーズが入る
+#                   （利用者は config.txt.example をコピーして作る）
+# master_making/    非公開の原典コード
+.claude/
+config.txt
+master_making/
+
 # macOS
 .DS_Store
 
