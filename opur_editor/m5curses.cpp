@@ -30,10 +30,15 @@
 #undef KEY_TAB
 
 #include "m5curses.h"
+#include "splash_png.h"
 
 namespace {
 
 M5Canvas *g_canvas = nullptr;
+
+// スプラッシュを出しておく最短時間（ms）。
+// SD マウントと NVS 初期化はこの裏で走るので、実際の待ちはこれより短い。
+constexpr uint32_t kSplashMs = 1500;
 
 // 通常時の色。A_REVERSE のときは入れ替えて使う。
 constexpr uint16_t kFg = TFT_WHITE;
@@ -80,6 +85,17 @@ void initscr(void) {
     auto cfg = M5.config();
     M5Cardputer.begin(cfg, true);
 
+    auto &d = M5Cardputer.Display;
+    d.setRotation(1);              // 240x135 の横向き
+
+    // スプラッシュ。画面が使えるようになった直後に出し、SD マウントと
+    // NVS 初期化はその裏で済ませる。どちらも数百 ms かかるので、
+    // 先に出しておくと待ち時間がまるごと隠れる。
+    // Canvas ではなく Display に直接描く。Canvas はまだ無いし、
+    // 8bpp に落とすと写真的な階調が潰れるため。
+    d.drawPng(splash_png, sizeof(splash_png), 0, 0);
+    const uint32_t splash_start = millis();
+
     g_sd_ok = mount_sd();
 
     // NVS（内蔵 Flash の小さな不揮発領域）。書きかけの自動退避に使う。
@@ -95,8 +111,13 @@ void initscr(void) {
         g_nvs_ok = (err == ESP_OK);
     }
 
-    auto &d = M5Cardputer.Display;
-    d.setRotation(1);              // 240x135 の横向き
+    // 裏の初期化で使ったぶんを差し引いて、残りだけ待つ。
+    // 初期化のほうが長引いていたら待たずに進む。
+    {
+        const uint32_t elapsed = millis() - splash_start;
+        if (elapsed < kSplashMs) delay(kSplashMs - elapsed);
+    }
+
     d.fillScreen(kBg);
 
     g_canvas = new M5Canvas(&d);
