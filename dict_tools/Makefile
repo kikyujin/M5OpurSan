@@ -34,8 +34,12 @@ $(DIC) $(STATS): build_dict.py | $(NATUME_DIR)/alt-cannadic-110208
 	$(PYTHON) build_dict.py
 
 # --- テスト ---
-$(TESTER): test_dict.c
-	$(CC) $(CFLAGS) -o $@ $<
+# 辞書アクセス層は opur_dict.c。opur_editor/ からも -I. で参照される。
+$(TESTER): test_dict.o opur_dict.o
+	$(CC) $(CFLAGS) -o $@ test_dict.o opur_dict.o
+
+%.o: %.c opur_dict.h
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 test-dict: $(TESTER) $(DIC)
 	./$(TESTER)
@@ -44,7 +48,7 @@ interactive: $(TESTER) $(DIC)
 	./$(TESTER) -i
 
 clean:
-	rm -f $(TESTER) $(DIC) $(STATS)
+	rm -f $(TESTER) test_dict.o opur_dict.o $(DIC) $(STATS)
 	-rmdir $(OUT_DIR) 2>/dev/null || true
 
 distclean: clean
