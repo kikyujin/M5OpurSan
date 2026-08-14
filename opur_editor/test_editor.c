@@ -502,7 +502,7 @@ static void test_scroll(void) {
     }
     opur_layout(&ed, &lay);
     eq_int("行数", lay.count, 10);
-    eq_int("最終行にいるとき scroll_top", ed.scroll_top, 3);
+    eq_int("最終行にいるとき scroll_top", ed.scroll_top, 4);
     eq_int("カーソル行", opur_cursor_line(&lay, ed.cursor), 9);
 
     for (i = 0; i < 9; i++) opur_up(&ed);
@@ -511,9 +511,9 @@ static void test_scroll(void) {
     eq_int("先頭行まで↑: scroll_top", ed.scroll_top, 0);
 
     for (i = 0; i < 9; i++) opur_down(&ed);
-    eq_int("最終行まで↓: scroll_top", ed.scroll_top, 3);
+    eq_int("最終行まで↓: scroll_top", ed.scroll_top, 4);
 
-    // 7 行以下なら scroll_top は 0 のまま
+    // 本文行数（6 行）以下なら scroll_top は 0 のまま
     opur_init(&ed);
     feed(&ed, "a\nb\nc");
     eq_int("3 行: scroll_top", ed.scroll_top, 0);
@@ -524,7 +524,7 @@ static void test_scroll(void) {
         opur_insert(&ed, (uint16_t)('0' + i));
         if (i < 9) opur_insert(&ed, OPUR_LF);
     }
-    eq_int("削除前: scroll_top", ed.scroll_top, 3);
+    eq_int("削除前: scroll_top", ed.scroll_top, 4);
     while (ed.len > 3) opur_backspace(&ed);
     eq_int("削除後: scroll_top", ed.scroll_top, 0);
     invariants(&ed, "scroll");
@@ -687,7 +687,7 @@ static void run_dump(void) {
 
     opur_init(&ed);
     feed(&ed, "0\n1\n2\n3\n4\n5\n6\n7\n8\n9");
-    dump(&ed, "観点8: 10 行のうち末尾 7 行を表示");
+    dump(&ed, "観点8: 10 行のうち末尾 6 行を表示");
 }
 
 int main(int argc, char** argv) {

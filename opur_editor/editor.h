@@ -18,7 +18,9 @@ extern "C" {
 
 #define OPUR_BUF_MAX 512     // バッファ最大文字数（UTF-16 単位、BMP のみ）
 #define OPUR_COLS    30      // 本文領域の幅（半角換算）
-#define OPUR_ROWS    7       // 本文領域の行数
+// 本文領域の行数。画面は 8 行で、残り 2 行を FEP 入力行と候補バーが使う
+// （M5 Cardputer は 240x135 / efont 16px で 30 半角 x 8 行）。
+#define OPUR_ROWS    6
 #define OPUR_LF      0x000A  // 改行（buf に 1 文字として格納）
 
 // 論理行の最大数。全文字が LF のとき 512 行 + 末尾の空行 1 で 513。
