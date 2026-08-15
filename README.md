@@ -178,3 +178,15 @@ Rupo を生み出した東芝の技術者の皆さんに。
 - https://x.com/777kdm
 - [M5Stackワープロ M5OpurSan 爆誕💥](https://note.com/kikyujin/n/ndca2a3bfbf7a)
 
+## クレジット
+
+------
+
+```
+   🦊✨ Crafted with love by ✨🎈
+
+   Kikyujin    — 物語の設計者
+   エルマー     — AIの相棒
+
+   2026.8.15 — Mahito KIDA / MULTiTApps INC. / FoxTail LAB.
+```
