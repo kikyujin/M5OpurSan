@@ -13,12 +13,11 @@ opur_editor/*.o
 opur_editor/opur_editor
 opur_editor/test_editor
 opur_editor/test_candidate_bar
+opur_editor/test_dict
 
-# dict_tools: 辞書素材の clone と生成物（どちらも make で再生成できる）
-dict_tools/natume/
-dict_tools/output/
-dict_tools/*.o
-dict_tools/test_dict
+# dict: 辞書素材の clone と生成物（どちらも make で再生成できる）
+dict/natume/
+dict/output/
 
 # 公開しないもの
 # .claude/          ローカルの権限設定。絶対パス等の環境情報が残る

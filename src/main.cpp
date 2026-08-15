@@ -38,7 +38,7 @@
 #ifdef M5OPUR
   #define DICT_PATH M5C_SD_MOUNT "/dict/system.dic"
 #else
-  #define DICT_PATH "../dict_tools/output/system.dic"
+  #define DICT_PATH "../dict/output/system.dic"
 #endif
 
 #define OPUR_DIR      M5C_SD_MOUNT "/opur"

@@ -25,7 +25,7 @@
 #include <stdio.h>
 
 #define KEY_CTRL_Q 17
-#define DICT_PATH "../dict_tools/output/system.dic"
+#define DICT_PATH "../dict/output/system.dic"
 
 // CandBar は約 84KB あるのでスタックには置けない。
 static CandBar    g_bar;
@@ -221,7 +221,7 @@ int main(void) {
 
     if (!have_dict) {
         fprintf(stderr, "辞書を開けなかった: %s\n", DICT_PATH);
-        fprintf(stderr, "  dict_tools/ で make build-dict を実行して\n");
+        fprintf(stderr, "  ../dict/ で make build-dict を実行して\n");
         return 1;
     }
     return 0;

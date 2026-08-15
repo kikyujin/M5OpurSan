@@ -15,15 +15,18 @@
 WIFI_SSID=MyWiFi
 WIFI_PASS=your-passphrase
 
-# 書いたものの送信先。ESC メニューの「1 保存」のあと、/opur/ に溜まった
-# 未送信ファイルを古いものから 1 件だけ送る（送れたら /opur/sent/ へ移す）。
+# 送信先 URL（任意）
 #
-# 相手が引き取るまでは送らないので、この行を消しても書いたものは
-# SD に残り続ける。WiFi が無い場所では黙って送信を飛ばす。
+# ESC メニューの「4 送信」で、**いま編集中の本文**をここへ送る。
+# 保存とは別の操作で、自動では一切送らない。
 #
-# URL は EQIDEN が発行する「https://eqiden.com/ + 64桁の16進トークン」。
+# 設定しなければ「4 送信」が「WiFi/URL 未設定」で戻るだけ。
+# 他の機能（入力・編集・保存・読込）には影響しない。
+#
+# URL は EQIDEN（https://eqiden.com）が発行する
+# 「https://eqiden.com/ + 64桁の16進トークン」。
 # 手元で試すなら:
 #   curl -s URL                      … 中身を見る（空なら送信可）
 #   curl -X PUT -d "" URL            … 引き取って空に戻す
-#
-# ENDPOINT_URL=https://eqiden.com/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
+ENDPOINT_URL=https://eqiden.com/your-token

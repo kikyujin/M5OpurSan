@@ -521,7 +521,7 @@ static void interactive(OpurDict *d) {
 
 int main(int argc, char **argv) {
     OpurDict d;
-    const char *path = "output/system.dic";
+    const char *path = "../dict/output/system.dic";
     int rc;
 
     if (argc >= 3 && strcmp(argv[1], "-d") == 0) path = argv[2];
@@ -529,7 +529,7 @@ int main(int argc, char **argv) {
     rc = opur_dict_open(&d, path);
     if (rc != 0) {
         fprintf(stderr, "辞書を開けない: %s (rc=%d)\n", path, rc);
-        fprintf(stderr, "  make build-dict を先に実行して\n");
+        fprintf(stderr, "  ../dict/ で make build-dict を先に実行して\n");
         return 1;
     }
 

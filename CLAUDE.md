@@ -57,9 +57,12 @@ Canvas が 8bpp だった頃は接続後 44KB しか残らず、**HTTPS が張�
 
 ```bash
 # PC 側（実機とは完全に独立）
-cd opur_editor && make && ./test_editor && ./test_candidate_bar
+#
+# **`make && ./test_editor` としないこと。** 既定ターゲットは本体だけを作るので、
+# テストは前回の古いバイナリが走る（気づかず 1 往復無駄にした）。
+# `make test` ならビルドしてから実行してくれる。
+cd opur_editor && make test && make test-dict
 make -C fep selftest          # 'test' ターゲットは無い
-make -C dict_tools test-dict  # 同上
 
 # 実機
 pio run

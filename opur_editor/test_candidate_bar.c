@@ -14,7 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define DEFAULT_DICT "../dict_tools/output/system.dic"
+#define DEFAULT_DICT "../dict/output/system.dic"
 
 // CandBar は約 84KB あるのでスタックに置かない。
 static CandBar g_bar;
@@ -635,7 +635,7 @@ int main(int argc, char **argv) {
         t7_lru();
     } else {
         printf("\n辞書が開けないので 5〜7 をスキップした。\n");
-        printf("  dict_tools/ で make build-dict を実行して\n");
+        printf("  ../dict/ で make build-dict を実行して\n");
         g_fail++;   // 素通ししたと誤解しないよう失敗扱いにする
     }
 
