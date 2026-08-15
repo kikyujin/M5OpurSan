@@ -41,8 +41,14 @@
 #endif
 
 #define OPUR_DIR      M5C_SD_MOUNT "/opur"
-#define OPUR_SENT_DIR M5C_SD_MOUNT "/opur/sent"
 #define CONFIG_PATH   M5C_SD_MOUNT "/config.txt"
+
+// 開いている（= 次の保存で上書きする）ファイル名。空なら新規。
+// "OPUR_0016.txt" で 13 文字。9999 を超えて 5 桁になっても収まる。
+static char s_current_file[16];
+
+// ロードのファイル一覧。64 件あれば十分（256 バイト）。
+#define LOAD_MAX_FILES 64
 
 // 無操作がこれだけ続いたら NVS に退避する。
 //
@@ -359,12 +365,17 @@ static int scan_max_index(const char *dir) {
     return max_n;
 }
 
-// 本文を /sdcard/opur/OPUR_nnnn.txt に書き出す。
-// 成功したら採番した番号、失敗したら -1、本文が空なら 0。
+// 本文を SD に書き出す。
+//
+// s_current_file が空なら新しい番号を採番し、非空ならそのファイルを上書きする。
+// 採番は「いまある最大 + 1」で、欠番は埋めない（0001,0003,0007 の次は 0008）。
+// 埋めてしまうと、消したファイルの番号が別の文書に再利用されて紛らわしい。
+//
+// 成功したら 1、失敗したら -1、本文が空なら 0。
+// 保存したファイル名は s_current_file に入る（続けて保存すれば上書きになる）。
 static int save_to_sd(void) {
     static char u8[OPUR_BUF_MAX * 3 + 1];   // UTF-16 1 文字は UTF-8 で最大 3 バイト
-    char path[64];
-    int  n;
+    char path[80];
     FILE *fp;
     size_t bytes, written;
 
@@ -372,20 +383,13 @@ static int save_to_sd(void) {
     if (!m5c_sd_ready()) return -1;
 
     // /opur/ がまだ無いこともある。mkdir は既にあれば失敗するだけなので放置。
-    // sent/ も一緒に作る。送信側で作ってもよいが、番号の採番でここが
-    // scan_max_index(OPUR_SENT_DIR) を読むので、先に在るほうが素直。
     mkdir(OPUR_DIR, 0777);
-    mkdir(OPUR_SENT_DIR, 0777);
 
-    // sent/ に移されたものと番号がぶつからないよう両方見る
-    n = scan_max_index(OPUR_DIR);
-    {
-        int ns = scan_max_index(OPUR_SENT_DIR);
-        if (ns > n) n = ns;
+    if (s_current_file[0] == '\0') {
+        const int n = scan_max_index(OPUR_DIR) + 1;
+        snprintf(s_current_file, sizeof(s_current_file), "OPUR_%04d.txt", n);
     }
-    n += 1;
-
-    snprintf(path, sizeof(path), "%s/OPUR_%04d.txt", OPUR_DIR, n);
+    snprintf(path, sizeof(path), "%s/%s", OPUR_DIR, s_current_file);
 
     bytes = (size_t)utf16_to_utf8(g_ed.buf, g_ed.len, u8, sizeof(u8));
 
@@ -394,16 +398,70 @@ static int save_to_sd(void) {
     written = fwrite(u8, 1, bytes, fp);
     fclose(fp);
 
-    return (written == bytes) ? n : -1;
+    return (written == bytes) ? 1 : -1;
+}
+
+// SD のファイルを本文に読み込む。成功したら 1、失敗したら -1。
+//
+// SD 上は UTF-8、エディタバッファは UTF-16。変換は utf8_to_utf16() が
+// 既にあるのでそれを使う（本文への挿入 insert_utf8 と同じ経路）。
+static int load_from_sd(const char *fname) {
+    static char u8[OPUR_BUF_MAX * 3 + 1];
+    char   path[80];
+    FILE  *fp;
+    size_t nread;
+    int    n;
+
+    if (!m5c_sd_ready()) return -1;
+
+    snprintf(path, sizeof(path), "%s/%s", OPUR_DIR, fname);
+
+    fp = fopen(path, "rb");
+    if (!fp) return -1;
+
+    nread = fread(u8, 1, sizeof(u8) - 1, fp);
+    fclose(fp);
+    u8[nread] = '\0';
+
+    // 変換先はバッファそのもの。入り切らないぶんは捨てられる
+    // （utf8_to_utf16 は dst_max で止まり、常に 0 以上を返す）。
+    // 空ファイルなら 0 文字。それも正常な結果として扱う。
+    n = utf8_to_utf16(u8, g_ed.buf, OPUR_BUF_MAX);
+
+    g_ed.len      = n;
+    g_ed.cursor   = 0;
+    g_ed.goal_col = -1;
+    g_ed.scroll_top = 0;
+    opur_update_scroll(&g_ed);
+
+    return 1;
 }
 
 // 本文と退避内容を捨てて新規状態にする。
+// 開いていたファイルも忘れる（次の保存は新しい番号になる）。
 static void start_new(void) {
     opur_init(&g_ed);
     g_fep.ClearMode();
     cand_bar_clear(&g_bar);
     nvs_clear();
     g_dirty = false;
+    s_current_file[0] = '\0';
+}
+
+// 選択肢を出してキーを待ち、押されたキーを返す。
+// notice() と違って呼び出し側が分岐する（「保存する？ 1:はい 2:いいえ」など）。
+static int ask(const char *l1, const char *l2) {
+    int ch;
+
+    clear();
+    mvaddstr(2, 0, l1);
+    if (l2) mvaddstr(3, 0, l2);
+    refresh();
+
+    timeout(-1);            // ここは待ち切る
+    ch = getch();
+    timeout(IDLE_SAVE_MS);
+    return ch;
 }
 
 // 数行のメッセージを出してキー待ちする。
@@ -444,6 +502,10 @@ static void warn_no_dict(void) {
 #define ROW_STATUS2 (M5C_ROWS - 1)   // = 7。view_m5.c の ROW_CAND
 
 #define BOOT_STATUS_MS 2000
+
+// 知らせを出しておく時間（ms）。読み落としても実害が無いものに使う。
+// 詳しい理由は隠しの「5 ログ」に残っている。
+#define FLASH_MS 1000
 
 // 短い知らせ。notice() と違ってキー待ちで止めず、ms 経ったら勝手に戻る。
 // 送信結果や「未実装」のように、読めなくても困らないものはこちら。
@@ -608,44 +670,194 @@ static void log_key(int ch) {
 // ESC メニュー
 // ---------------------------------------------------------------------------
 
-// 送信結果・未実装の知らせを出しておく時間（ms）。
-// 読み落としても実害が無いので短くしてある。送信結果は次の保存でまた出るし、
-// 詳しい理由は「4 ﾛｸﾞ」に残っている。
-#define FLASH_MS 1000
+// /opur/ の OPUR_*.txt の番号を集めて昇順に並べる。件数を返す。
+// 欠番があっても詰めて並ぶだけなので、飛び番の一覧をそのまま辿れる。
+static int scan_file_list(int *nums, int cap) {
+    DIR *d = opendir(OPUR_DIR);
+    struct dirent *e;
+    int count = 0;
+    int i;
 
-// 保存できたあと、キューの先頭 1 件を送ってみる。
-// 送信は編集と独立していて、失敗しても本文は SD に残っているので、
-// 結果は一言出すだけで止めない。
-static void send_after_save(void) {
-    switch (opur_net_try_send()) {
-    case 1:  flash_status("sent!",    NULL, FLASH_MS); break;
-    case -1: flash_status("send err", "ログ(ESC-4)に理由", FLASH_MS); break;
-    default: break;   // 0 = 送る条件が揃っていない。通常運用なので黙る
+    if (!d) return 0;
+
+    while ((e = readdir(d)) != NULL && count < cap) {
+        int n = 0;
+        if (sscanf(e->d_name, "OPUR_%d.txt", &n) != 1) continue;
+        nums[count++] = n;
+    }
+    closedir(d);
+
+    // readdir の順は保証されないので自分で並べる。
+    // 高々 LOAD_MAX_FILES 件なので挿入ソートで足りる。
+    for (i = 1; i < count; i++) {
+        const int v = nums[i];
+        int j = i - 1;
+        while (j >= 0 && nums[j] > v) { nums[j + 1] = nums[j]; j--; }
+        nums[j + 1] = v;
+    }
+    return count;
+}
+
+// ロード。ファイルを選ばせ、選ばれたものを本文に読み込む。
+//
+// 選択中のファイルの中身をそのまま本文に読み込んで view_draw() に描かせる
+// （＝プレビュー）。専用の描画を書かずに済み、実際に読み込んだ結果が
+// そのまま見えるので「開いてみたら違った」が起きない。
+// 中止したときのために、入る前の本文を退避しておく。
+static void do_load(void) {
+    // どちらも loop タスクの 8KB スタックには置けないので静的に。
+    static uint16_t saved_buf[OPUR_BUF_MAX];
+    static int      nums[LOAD_MAX_FILES];
+
+    char fname[16];
+    int  saved_len, saved_cursor;
+    int  count, sel = 0;
+
+    // 書きかけがあるなら先に始末をつける。黙って捨てない。
+    if (g_dirty) {
+        const int ch = ask("保存しますか?", "1:はい 2:いいえ ESC:中止");
+
+        if (ch == '1') {
+            if (save_to_sd() < 0) {
+                notice("保存できません", "読込をやめます");
+                return;
+            }
+            g_dirty = false;
+        } else if (ch != '2') {
+            return;             // ESC や誤爆。書きかけを捨てないよう中止する
+        }
+    }
+
+    count = scan_file_list(nums, LOAD_MAX_FILES);
+    if (count == 0) {
+        flash_status("ファイルがありません", NULL, FLASH_MS);
+        return;
+    }
+
+    saved_len    = g_ed.len;
+    saved_cursor = g_ed.cursor;
+    memcpy(saved_buf, g_ed.buf, (size_t)saved_len * sizeof(g_ed.buf[0]));
+
+    for (;;) {
+        char l1[48];
+        int  ch;
+
+        snprintf(fname, sizeof(fname), "OPUR_%04d.txt", nums[sel]);
+
+        // 読めないファイルも一覧には出す。中身を空にして選択は続けられる。
+        if (load_from_sd(fname) < 0) opur_init(&g_ed);
+
+        // 本文は view に描かせ、下 2 行だけ上書きする。
+        // ここだけのためにビューへ新しいモードを足すほどではない。
+        view_draw(&g_ed, NULL, 0, NULL, 0);
+
+        // 記号は < > を使う。◀ ▶ は JIS X 0208 に無く efont では豆腐になる
+        // （candidate_bar / view_m5.c の draw_cand と同じ理由）。
+        snprintf(l1, sizeof(l1), "< %s > %d/%d", fname, sel + 1, count);
+        mvaddstr(ROW_STATUS1, 0, l1);
+        mvaddstr(ROW_STATUS2, 0, "Enter:読込 ESC:戻る");
+        m5c_separator();
+        refresh();
+
+        timeout(-1);            // 選んでいる間は待ち切る
+        ch = getch();
+        timeout(IDLE_SAVE_MS);
+
+        if (ch == KEY_LEFT)  { sel = (sel + count - 1) % count; continue; }
+        if (ch == KEY_RIGHT) { sel = (sel + 1) % count;         continue; }
+
+        if (ch == '\r' || ch == '\n' || ch == KEY_ENTER) {
+            // 本文はプレビューで既に g_ed に入っている。
+            strncpy(s_current_file, fname, sizeof(s_current_file) - 1);
+            s_current_file[sizeof(s_current_file) - 1] = '\0';
+
+            g_fep.ClearMode();
+            cand_bar_clear(&g_bar);
+
+            // 保存と同じ理由で nvs_save() はしない。読み込んだ内容は
+            // SD にあるので、失っても開き直せる。
+            g_dirty = false;
+            return;
+        }
+
+        if (ch == KEY_ESC) {
+            memcpy(g_ed.buf, saved_buf, (size_t)saved_len * sizeof(g_ed.buf[0]));
+            g_ed.len        = saved_len;
+            g_ed.cursor     = saved_cursor;
+            g_ed.goal_col   = -1;
+            g_ed.scroll_top = 0;
+            opur_update_scroll(&g_ed);
+            return;
+        }
+    }
+}
+
+// 送信。**いま編集中のバッファ**をそのまま送る。ファイルは読まない。
+// 画面に見えているものが送られる、という一対一の対応にしてある。
+static void do_send(void) {
+    static char u8[OPUR_BUF_MAX * 3 + 1];
+    int bytes;
+    int r;
+
+    if (g_ed.len <= 0) {
+        flash_status("本文が空です", NULL, FLASH_MS);
+        return;
+    }
+
+    // 通信は数秒ブロックする。何も出さないと固まったように見える。
+    clear();
+    mvaddstr(ROW_STATUS1, 0, "送信中...");
+    m5c_separator();
+    refresh();
+
+    r = opur_net_check();
+    if (r == 0) { flash_status("WiFi/URL 未設定", NULL, FLASH_MS);            return; }
+    if (r < 0)  { flash_status("通信エラー", "ログ(ESC-5)に理由", FLASH_MS); return; }
+
+    // 相手がまだ引き取っていない。上書きしてよいかは本人にしか決められない。
+    if (r == 2 && ask("前の文書が残っています", "1:上書き 2:やめる") != '1') return;
+
+    bytes = utf16_to_utf8(g_ed.buf, g_ed.len, u8, sizeof(u8));
+
+    clear();
+    mvaddstr(ROW_STATUS1, 0, "送信中...");
+    m5c_separator();
+    refresh();
+
+    if (opur_net_put(u8, bytes) == 1) {
+        flash_status("sent!", NULL, FLASH_MS);
+    } else {
+        flash_status("send err", "ログ(ESC-5)に理由", FLASH_MS);
     }
 }
 
 // メニュー表示中のキー処理。
 static void menu_key(int ch) {
     switch (ch) {
-    case '1': {
-        int n = save_to_sd();
-        if (n > 0) {
-            char msg[48];
-            snprintf(msg, sizeof(msg), "OPUR_%04d.txt", n);
-            start_new();                     // 保存できたら新規状態へ
+    case '1':
+        // 保存しても本文は残す。開いているファイルを編集し続けられないと
+        // 「上書き保存」に意味が無い。新規に戻したいときは '2'。
+        switch (save_to_sd()) {
+        case 1:
+            // ここで nvs_save() はしない。保存できた内容は SD にあるので
+            // NVS で守る必要がなく、編集を再開すれば dirty になって
+            // どのみち 10 秒後に退避される。
+            // NVS は書き込みの途中で電源が飛ぶとページが壊れ、以後
+            // 書くたびにパニックする（nvs_save() の注記を参照）。
+            // 守れるものが増えないなら、書きにいく回数は減らしておく。
+            g_dirty = false;
             g_mode = MODE_INPUT;
-            notice("保存しました", msg);
-            // 送信は保存を見せたあと。順番を逆にすると、通信待ちの数秒が
-            // 「保存できたのか分からないまま固まっている」ように見える。
-            send_after_save();
-        } else if (n == 0) {
+            notice("保存しました", s_current_file);
+            break;
+        case 0:
             // 空ファイルは作らない。メニューは開いたままにして意図を伝える
             notice("本文が空です", "保存しませんでした");
-        } else {
+            break;
+        default:
             notice("保存できません", m5c_sd_ready() ? OPUR_DIR : "SD が読めません");
+            break;
         }
         break;
-    }
 
     case '2':
         start_new();
@@ -653,14 +865,18 @@ static void menu_key(int ch) {
         break;
 
     case '3':
-        // 読込は 020 で実装する。項目だけ先に出してあるので、
-        // 押しても何も起きないと壊れて見える。一言返して戻る。
         g_mode = MODE_INPUT;
-        flash_status("読込は未実装です", NULL, FLASH_MS);
+        do_load();
         break;
 
     case '4':
-        // 開いた直後は最新が見えていてほしいので末尾に寄せる
+        g_mode = MODE_INPUT;
+        do_send();
+        break;
+
+    case '5':
+        // 隠し。メニューには出していない（開発用）。
+        // 開いた直後は最新が見えていてほしいので末尾に寄せる。
         g_log_top = opur_log_count();
         log_clamp();
         g_mode = MODE_LOG;

@@ -33,9 +33,10 @@ Detected flash size: 8MB
 
 ## メモリの余裕が無い（HTTPS を触るとき必読）
 
-WiFi 接続後に残る内部ヒープは、素の状態で **44KB 程度**しかない。
-一方 **mbedTLS のハンドシェイクには 45〜50KB** 要る（入出力バッファ 16KB x 2 が主）。
-つまり**何も工夫しないと HTTPS は張れない**。
+WiFi スタックが 50KB 前後を持っていく（起動ログの `heap 129>78K`）。
+**mbedTLS のハンドシェイクには 45〜50KB** 要るので余裕はほとんど無い。
+Canvas が 8bpp だった頃は接続後 44KB しか残らず、**HTTPS が張れなかった**
+（実機で `GET -1`）。1bpp にして 28KB 空けた今が **78KB**。
 
 いま枠を作っているのは 1 箇所だけ:
 
@@ -77,13 +78,60 @@ ESC メニューの「4 ログ」。32 行のリングバッファ。
 
 - **開いた直後は最新 7 行**しか見えない。起動時の行（`PSRAM` など）は
   ↑ で戻らないと出てこない
-- `opur_log_add()` はシリアルにも吐くが、**出る先は UART0（GPIO43/44）で
-  USB ではない**。`ARDUINO_USB_CDC_ON_BOOT=1` が効くのは `Serial` だけで、
-  `printf`/stdout は sdkconfig の `CONFIG_ESP_CONSOLE_UART_DEFAULT` に従う。
-  USB を繋いで `cat /dev/cu.usbmodem*` しても 0 バイト（確認済み）
 - `esp_restart()` はリセット理由が「ソフトリセット」になり、
   `setup()` のパンくず表示条件（`!= 1 && != 3`）から外れて**ログに何も残らない**。
   意図的に再起動するなら、別に痕跡を残すこと
+
+### ホストから全文を読む（画面を読み上げてもらうより速い）
+
+`opur_log_add()` は `printf` でシリアルにも吐く。`CONFIG_ESP_CONSOLE_UART_DEFAULT`
+で UART0 に出るが、`CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG` も立っているので
+**USB 側にも出る**。パニックのバックトレースも同じ経路に出る。
+
+**`cat /dev/cu.usbmodem*` は使えない。** データが無い間の read 0 を EOF と解釈して
+即終了し、「何も出ていない」ように見える（これで一度誤診した）。
+`pio device monitor` も stdin が TTY でないと `termios.error` で落ちる。
+
+読み続ける側を自分で書く:
+
+```python
+import sys, serial
+s = serial.Serial()
+s.port = '/dev/cu.usbmodem83201'; s.baudrate = 115200; s.timeout = 0.5
+s.dtr = False; s.rts = False      # 触るとリセット／ブートローダ突入がありうる
+s.open()
+out = open(sys.argv[1], 'wb', buffering=0)
+while True:
+    d = s.read(4096)
+    if d: out.write(d)            # 0 バイトでも EOF 扱いにしない
+```
+
+`~/.platformio/penv/bin/python` に pyserial が入っている。
+読むときは `tr -d '\r'` を通すと日本語がそのまま読める。
+
+## NVS は壊れることがある（そして自分で直る）
+
+書きかけの自動退避に内蔵 Flash の NVS を使っている。**書き込みの途中で電源が
+飛ぶとページが半端な状態で残り、以後 `nvs_set_blob()` を呼ぶたびに
+ESP-IDF 内部の assert でパニックする**（クラッシュの自己再生産）。
+
+抜け道は `setup()` に入っている。パンくずが 220〜226（NVS 書き込み中）なら
+`m5c_nvs_reset()` で全消去して作り直す。**一度パニックするが次の起動で復帰する。**
+
+2026-08-15 に実際に踏んだ。症状は「上書き保存でリセット」「送信後しばらくして
+リセット」で、パンくずは `221 NVS: open後 a=0`（＝ open は成功、`nvs_set_blob`
+の中で落ちた）。原因は開発中に何度も焼いたことと見ている。無操作 10 秒ごとに
+退避が走るので、`pio run -t upload` のリセットと噛むと「書き込み中の電源断」に
+なる。通常運用ではめったに当たらない。
+
+**予防的に NVS を作り直すのは避けること。** `nvs_flash_erase()` はパーティション
+全体を消すので、ESP-IDF が持つ **WiFi のキャリブレーション情報も一緒に消える**。
+実際に接続時間が 650ms → 2500ms に伸びた（`OPUR_WIFI_TIMEOUT_MS` は 3000）。
+Flash の消去回数も食うし、再構築自体が書き込みなので予防にもなっていない。
+
+減らすべきなのは**書きにいく回数**のほう。SD に保存した直後やロード直後は
+内容が SD にあるので、そこで退避しても守れるものは増えない（020 で一度足して
+から外した）。
 
 ## 送信（opur_net）の設計
 
