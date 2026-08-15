@@ -17,6 +17,7 @@
 #include "m5curses.h"
 #include "opur_config.h"
 #include "opur_log.h"
+#include "opur_net.h"
 #include "opur_wifi.h"
 #include "utf8_utf16.h"
 #include "view.h"
@@ -370,7 +371,10 @@ static int save_to_sd(void) {
     if (!m5c_sd_ready()) return -1;
 
     // /opur/ がまだ無いこともある。mkdir は既にあれば失敗するだけなので放置。
+    // sent/ も一緒に作る。送信側で作ってもよいが、番号の採番でここが
+    // scan_max_index(OPUR_SENT_DIR) を読むので、先に在るほうが素直。
     mkdir(OPUR_DIR, 0777);
+    mkdir(OPUR_SENT_DIR, 0777);
 
     // sent/ に移されたものと番号がぶつからないよう両方見る
     n = scan_max_index(OPUR_DIR);
@@ -440,6 +444,24 @@ static void warn_no_dict(void) {
 
 #define BOOT_STATUS_MS 2000
 
+// 短い知らせ。notice() と違ってキー待ちで止めず、ms 経ったら勝手に戻る。
+// 送信結果や「未実装」のように、読めなくても困らないものはこちら。
+//
+// 元に戻す処理は要らない。呼び出し側が MODE_INPUT に戻れば、
+// loop() の次の view_draw() が画面をまるごと描き直す。
+static void flash_status(const char *l1, const char *l2, int ms) {
+    clear();
+    mvaddstr(ROW_STATUS1, 0, l1);
+    if (l2) mvaddstr(ROW_STATUS2, 0, l2);
+    m5c_separator();
+    refresh();
+
+    // キーを押せばすぐ飛ばせる（getch は溜まっていれば待たずに返る）。
+    timeout(ms);
+    getch();
+    timeout(IDLE_SAVE_MS);
+}
+
 static void boot_wifi(void) {
     char l1[64], l2[64];
     int  keys;
@@ -449,6 +471,12 @@ static void boot_wifi(void) {
 
     if (keys < 0) opur_log_add("cfg: 読めません");
     else          opur_log_add("cfg: %d 項目", keys);
+
+    // 送信先は WiFi とは別に決まる。WiFi の設定が無くて下で早期に返っても
+    // 困らないよう、ここで先に渡しておく。
+    opur_net_init(opur_config_endpoint(&g_cfg));
+    opur_log_add("送信先: %s",
+                 opur_config_endpoint(&g_cfg)[0] ? "あり" : "なし");
 
     // config.txt が無い / SD が無い / WiFi の設定が書かれていない。
     // どれも異常ではない（電波の無い場所で使うことは普通にある）ので、
@@ -579,6 +607,22 @@ static void log_key(int ch) {
 // ESC メニュー
 // ---------------------------------------------------------------------------
 
+// 送信結果・未実装の知らせを出しておく時間（ms）。
+// 読み落としても実害が無いので短くしてある。送信結果は次の保存でまた出るし、
+// 詳しい理由は「4 ﾛｸﾞ」に残っている。
+#define FLASH_MS 1000
+
+// 保存できたあと、キューの先頭 1 件を送ってみる。
+// 送信は編集と独立していて、失敗しても本文は SD に残っているので、
+// 結果は一言出すだけで止めない。
+static void send_after_save(void) {
+    switch (opur_net_try_send()) {
+    case 1:  flash_status("sent!",    NULL, FLASH_MS); break;
+    case -1: flash_status("send err", "ﾛｸﾞ(ESC-4)に理由", FLASH_MS); break;
+    default: break;   // 0 = 送る条件が揃っていない。通常運用なので黙る
+    }
+}
+
 // メニュー表示中のキー処理。
 static void menu_key(int ch) {
     switch (ch) {
@@ -590,6 +634,9 @@ static void menu_key(int ch) {
             start_new();                     // 保存できたら新規状態へ
             g_mode = MODE_INPUT;
             notice("保存しました", msg);
+            // 送信は保存を見せたあと。順番を逆にすると、通信待ちの数秒が
+            // 「保存できたのか分からないまま固まっている」ように見える。
+            send_after_save();
         } else if (n == 0) {
             // 空ファイルは作らない。メニューは開いたままにして意図を伝える
             notice("本文が空です", "保存しませんでした");
@@ -605,6 +652,13 @@ static void menu_key(int ch) {
         break;
 
     case '3':
+        // ロードは 020 で実装する。項目だけ先に出してあるので、
+        // 押しても何も起きないと壊れて見える。一言返して戻る。
+        g_mode = MODE_INPUT;
+        flash_status("ﾛｰﾄﾞは未実装です", NULL, FLASH_MS);
+        break;
+
+    case '4':
         // 開いた直後は最新が見えていてほしいので末尾に寄せる
         g_log_top = opur_log_count();
         log_clamp();

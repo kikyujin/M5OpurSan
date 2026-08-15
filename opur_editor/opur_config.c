@@ -15,9 +15,10 @@
 #include <string.h>
 
 // 値を 1 つ写す。長すぎる値は切り詰める（起動を止める理由にはしない）。
-static void set_str(char *dst, const char *src) {
-    strncpy(dst, src, OPUR_CFG_VAL_MAX - 1);
-    dst[OPUR_CFG_VAL_MAX - 1] = '\0';
+// 格納先の大きさは項目ごとに違う（URL だけ長い）ので cap で受け取る。
+static void set_str(char *dst, size_t cap, const char *src) {
+    strncpy(dst, src, cap - 1);
+    dst[cap - 1] = '\0';
 }
 
 static int is_space(char c) {
@@ -78,10 +79,11 @@ int opur_config_load(OpurConfig *cfg, const char *path) {
 
         if (key[0] == '#' || key[0] == '\0') continue;
 
-        if      (strcmp(key, "WIFI_SSID")    == 0) set_str(cfg->wifi_ssid,    val);
-        else if (strcmp(key, "WIFI_PASS")    == 0) set_str(cfg->wifi_pass,    val);
-        else if (strcmp(key, "OPUR_HOST")    == 0) set_str(cfg->opur_host,    val);
-        else if (strcmp(key, "DANTONG_HOST") == 0) set_str(cfg->dantong_host, val);
+        if      (strcmp(key, "WIFI_SSID")    == 0) set_str(cfg->wifi_ssid,    sizeof(cfg->wifi_ssid),    val);
+        else if (strcmp(key, "WIFI_PASS")    == 0) set_str(cfg->wifi_pass,    sizeof(cfg->wifi_pass),    val);
+        else if (strcmp(key, "ENDPOINT_URL") == 0) set_str(cfg->endpoint_url, sizeof(cfg->endpoint_url), val);
+        else if (strcmp(key, "OPUR_HOST")    == 0) set_str(cfg->opur_host,    sizeof(cfg->opur_host),    val);
+        else if (strcmp(key, "DANTONG_HOST") == 0) set_str(cfg->dantong_host, sizeof(cfg->dantong_host), val);
         else if (strcmp(key, "OPUR_PORT")    == 0) cfg->opur_port    = atoi(val);
         else if (strcmp(key, "DANTONG_PORT") == 0) cfg->dantong_port = atoi(val);
         else continue;                  // 知らないキー。found に数えない
@@ -95,4 +97,8 @@ int opur_config_load(OpurConfig *cfg, const char *path) {
 
 int opur_config_has_wifi(const OpurConfig *cfg) {
     return cfg && cfg->wifi_ssid[0] != '\0';
+}
+
+const char *opur_config_endpoint(const OpurConfig *cfg) {
+    return cfg ? cfg->endpoint_url : "";
 }

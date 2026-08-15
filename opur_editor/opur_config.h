@@ -10,6 +10,7 @@
 // フォーマット（実機の SD にあるものと同じ）:
 //   WIFI_SSID=MyWiFi
 //   WIFI_PASS=xxxxx
+//   ENDPOINT_URL=https://eqiden.com/t/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 //   OPUR_HOST=192.168.1.100
 //   OPUR_PORT=9500
 //   DANTONG_HOST=192.168.1.101
@@ -25,13 +26,21 @@ extern "C" {
 // 1 つの値の最大長。SSID・パスフレーズとも WPA2 の上限が 63 文字なので +1。
 #define OPUR_CFG_VAL_MAX 64
 
+// URL 1 本の最大長。ENDPOINT_URL は "https://eqiden.com/t/" + UUID で 57 文字
+// あり、OPUR_CFG_VAL_MAX（64）では余白がほとんど無い。ホスト名やパスが
+// 少し伸びただけで黙って切り詰められるので、URL だけ別枠にしてある。
+#define OPUR_CFG_URL_MAX 160
+
 // 1 行の最大長。key= と値、改行、終端で足りる長さ。
 // これを超える行は「超えたぶんを次の行として読まない」で捨てる。
-#define OPUR_CFG_LINE_MAX 160
+#define OPUR_CFG_LINE_MAX 224
 
 typedef struct {
     char wifi_ssid[OPUR_CFG_VAL_MAX];
     char wifi_pass[OPUR_CFG_VAL_MAX];
+
+    // 書いたものの送信先（EQIDEN のトークン URL）。空なら送信しない。
+    char endpoint_url[OPUR_CFG_URL_MAX];
 
     char opur_host[OPUR_CFG_VAL_MAX];
     int  opur_port;
@@ -54,6 +63,10 @@ int opur_config_load(OpurConfig *cfg, const char *path);
 // WiFi に繋ぎにいけるだけの設定があるか（SSID が空でない）。
 // パスフレーズは空でもよい（オープンな AP）。
 int opur_config_has_wifi(const OpurConfig *cfg);
+
+// 送信先 URL。未設定なら ""（NULL は返さない）。
+// cfg が NULL のときも "" を返すので、呼び出し側は長さだけ見ればよい。
+const char *opur_config_endpoint(const OpurConfig *cfg);
 
 #ifdef __cplusplus
 }  // extern "C"

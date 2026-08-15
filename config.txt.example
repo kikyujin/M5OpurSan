@@ -14,3 +14,11 @@
 
 WIFI_SSID=MyWiFi
 WIFI_PASS=your-passphrase
+
+# 書いたものの送信先。ESC メニューの「1 保存」のあと、/opur/ に溜まった
+# 未送信ファイルを古いものから 1 件だけ送る（送れたら /opur/sent/ へ移す）。
+#
+# 相手が引き取るまでは送らないので、この行を消しても書いたものは
+# SD に残り続ける。WiFi が無い場所では黙って送信を飛ばす。
+#
+# ENDPOINT_URL=https://eqiden.com/t/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
