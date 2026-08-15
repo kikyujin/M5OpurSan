@@ -3,14 +3,13 @@
 // 描画は必ず Canvas（オフスクリーン）に対して行い、refresh() で一括転送する。
 // 直接 Display に描くとちらつくため。curses の refresh と同じ役割。
 //
-// 色深度は 8bpp。240x135x1byte = 約 32KB で SRAM に収まる。
-// 16bpp だと 64KB 必要で、本文バッファや辞書キャッシュと取り合いになる。
-// 文字は前景・背景の 2 色しか使わないので 8bpp で足りる。
+// 色深度は 1bpp。240x135 で約 4KB。文字は前景・背景の 2 色しか使わないので
+// 階調は要らない。8bpp（32KB）から落として 28KB 空けてある。
+// **この 28KB が無いと TLS のハンドシェイクが張れない**（CLAUDE.md 参照）。
 
 #include <M5Cardputer.h>
 #include <SD.h>
 #include <SPI.h>
-#include <nvs_flash.h>
 
 // M5Cardputer の Keyboard_def.h は KEY_LEFT / KEY_ENTER などを
 // **USB HID のスキャンコード**として定義している（KEY_LEFT = 0x50 など）。
@@ -19,8 +18,8 @@
 //
 // 衝突するのはこのファイルの中だけ。view_m5.c や main.cpp は
 // M5Cardputer.h を include しないので影響を受けない。
-// なお getch() は HID コードを使わず keysState() の bool フラグだけを見るので、
-// 剥がしたことで困る箇所は無い。
+// なお getch() は HID コードを使わず、keysState() の bool フラグと
+// keyList() / getKeyValue() の**素の文字**しか見ないので、剥がしても困らない。
 #undef KEY_LEFT
 #undef KEY_RIGHT
 #undef KEY_UP
@@ -37,7 +36,7 @@ namespace {
 M5Canvas *g_canvas = nullptr;
 
 // スプラッシュを出しておく最短時間（ms）。
-// SD マウントと NVS 初期化はこの裏で走るので、実際の待ちはこれより短い。
+// SD マウントはこの裏で走るので、実際の待ちはこれより短い。
 constexpr uint32_t kSplashMs = 1500;
 
 // Canvas は 1bpp なので、これは色そのものではなくパレット番号。
@@ -48,8 +47,7 @@ constexpr uint16_t kBg = 0;
 
 int g_attrs = A_NORMAL;
 
-bool g_sd_ok  = false;
-bool g_nvs_ok = false;
+bool g_sd_ok = false;
 
 inline uint16_t fg() { return (g_attrs & A_REVERSE) ? kBg : kFg; }
 inline uint16_t bg() { return (g_attrs & A_REVERSE) ? kFg : kBg; }
@@ -116,8 +114,8 @@ void initscr(void) {
     auto &d = M5Cardputer.Display;
     d.setRotation(1);              // 240x135 の横向き
 
-    // スプラッシュ。画面が使えるようになった直後に出し、SD マウントと
-    // NVS 初期化はその裏で済ませる。どちらも数百 ms かかるので、
+    // スプラッシュ。画面が使えるようになった直後に出し、SD マウントは
+    // その裏で済ませる。数百 ms かかるので、
     // 先に出しておくと待ち時間がまるごと隠れる。
     // Canvas ではなく Display に直接描く。Canvas はまだ無いし、
     // 8bpp に落とすと写真的な階調が潰れるため。
@@ -126,18 +124,10 @@ void initscr(void) {
 
     g_sd_ok = mount_sd();
 
-    // NVS（内蔵 Flash の小さな不揮発領域）。書きかけの自動退避に使う。
-    // パーティションが壊れている / 新しい版で埋まっている場合は
-    // 消してからやり直す。ここで失敗しても表示は続けたいので戻り値は捨てる。
-    {
-        esp_err_t err = nvs_flash_init();
-        if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
-            err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-            nvs_flash_erase();
-            err = nvs_flash_init();
-        }
-        g_nvs_ok = (err == ESP_OK);
-    }
+    // NVS はここでは触らない。setup() より前に走る Arduino の initArduino() が
+    // 同じ手順（nvs_flash_init → 壊れていたら消して再 init）を済ませていて、
+    // 二重にやる意味が無い。WiFi の校正情報もその NVS に入っているので、
+    // こちらから消しにいかないこと（021 で自前の初期化を撤去した）。
 
     // 裏の初期化で使ったぶんを差し引いて、残りだけ待つ。
     // 初期化のほうが長引いていたら待たずに進む。
@@ -256,6 +246,20 @@ int scan_keys(int *out) {
         if (st.down  && n < kKeysMax) out[n++] = KEY_DOWN;
         if (st.esc   && n < kKeysMax) out[n++] = KEY_ESC;
         if (st.del   && n < kKeysMax) out[n++] = KEY_DC;
+
+        // Fn + S。ライブラリのキーマップでは S の Fn 層が KEY_NONE なので、
+        // フラグにも hid_keys にも何も入らない（Keyboard.cpp の PASS 2 が
+        // KEY_NONE を continue で捨てる）。押されている座標を自分で引いて、
+        // Fn 層ではなく**素の文字**が 's' かどうかで判定する。
+        //
+        // keyList() / getKeyValue() はどちらも公開 API で、キーマップは
+        // Cardputer と ADV で共通なので、この判定は両方で同じように効く。
+        for (const auto &pos : M5Cardputer.Keyboard.keyList()) {
+            if (M5Cardputer.Keyboard.getKeyValue(pos).value_first == 's') {
+                if (n < kKeysMax) out[n++] = KEY_SAVE;
+                break;
+            }
+        }
         return n;
     }
 
@@ -283,23 +287,6 @@ bool was_down(int code) {
 
 int m5c_sd_ready(void) {
     return g_sd_ok ? 1 : 0;
-}
-
-int m5c_nvs_ready(void) {
-    return g_nvs_ok ? 1 : 0;
-}
-
-int m5c_nvs_reset(void) {
-    // deinit してから消す。開いたままの erase は許されない。
-    nvs_flash_deinit();
-
-    if (nvs_flash_erase() != ESP_OK) {
-        g_nvs_ok = false;
-        return 0;
-    }
-
-    g_nvs_ok = (nvs_flash_init() == ESP_OK);
-    return g_nvs_ok ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------

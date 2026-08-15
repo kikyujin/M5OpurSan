@@ -62,6 +62,10 @@ extern "C" {
 #define KEY_ESC 0x1B
 #define KEY_TAB 0x09
 
+// ncurses に相当が無い、この層だけのキー。
+// ncurses の KEY_MAX は 0777（511）なので、0x200 以上なら衝突しない。
+#define KEY_SAVE (0x200 + 'S')   /* Fn + S。保存のショートカット */
+
 // M5.begin() → Display 初期化 → 描画用 Canvas 確保 → efontJA_16 設定。
 // 失敗しても戻り値では通知しない（curses の initscr と同じ流儀）。
 void initscr(void);
@@ -94,20 +98,6 @@ void m5c_separator(void);
 // SD がマウントできていれば 1。initscr() のあとで意味を持つ。
 int m5c_sd_ready(void);
 
-// NVS（内蔵 Flash の不揮発領域）が使えれば 1。initscr() の中で初期化する。
-// 実際の読み書きは呼び出し側が ESP-IDF の nvs API で行う。
-int m5c_nvs_ready(void);
-
-// NVS を消して作り直す。使えるようになれば 1。
-//
-// 書き込みの途中で電源が落ちたりクラッシュしたりすると、NVS のページが
-// 半端な状態で残り、次の書き込みで IDF 側の assert に当たって
-// パニックし続けることがある（クラッシュが自分で自分を再生産する）。
-// そこから抜ける唯一の手段が全消去なので、最後の手段として用意してある。
-//
-// **保存済みの内容はすべて消える。** 呼ぶ側がそれでよいと判断したときだけ。
-int m5c_nvs_reset(void);
-
 // 属性のオン・オフ。
 //   A_REVERSE   前景色と背景色を入れ替える
 //   A_UNDERLINE 描いた文字列の下端に 1px の水平線を引く
@@ -124,6 +114,7 @@ void attroff(int attrs);
 //   Fn + , . ; /                KEY_LEFT / KEY_DOWN / KEY_UP / KEY_RIGHT
 //   Fn + `                      KEY_ESC
 //   Fn + BS                     KEY_DC
+//   Fn + S                      KEY_SAVE
 //
 // 押しっぱなしでは繰り返さない（キーリピートは未実装）。
 // Ctrl+英字 は生成しない —— 実機では ESC でメニューに入る仕様のため不要。

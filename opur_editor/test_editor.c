@@ -388,7 +388,7 @@ static void test_vertical_bounds(void) {
     OpurLayout lay;
     int before;
 
-    printf("\n=== 観点5-d: 先頭行で↑ / 最終行で↓ は何もしない ===\n");
+    printf("\n=== 観点5-d: 先頭行で↑ は何もしない / 最終行で↓ は行末へ ===\n");
 
     opur_init(&ed);
     feed(&ed, "abc\ndef");
@@ -399,11 +399,19 @@ static void test_vertical_bounds(void) {
     opur_up(&ed);
     eq_int("先頭行で↑", ed.cursor, before);
 
+    // 既に末尾にいるなら動かない（見かけ上は従来と同じ）
     ed.cursor = ed.len;
     ed.goal_col = -1;
     before = ed.cursor;
     opur_down(&ed);
-    eq_int("最終行で↓", ed.cursor, before);
+    eq_int("最終行の末尾で↓", ed.cursor, before);
+
+    // 最終行の途中からは末尾へ飛ぶ（021 の変更点）
+    ed.cursor = 5;              // "abc\ndef" の 'e' の手前
+    ed.goal_col = -1;
+    opur_down(&ed);
+    eq_int("最終行の途中で↓ → 行末", ed.cursor, ed.len);
+    eq_int("↓ で goal_col は捨てる", ed.goal_col, -1);
 
     // ↓ で降りて ↑ で戻る往復
     ed.cursor = 1;

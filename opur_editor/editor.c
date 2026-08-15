@@ -204,7 +204,18 @@ static void move_vertical(OpurEditor* ed, int delta) {
     opur_layout(ed, &lay);
     line = opur_cursor_line(&lay, ed->cursor);
     target = line + delta;
-    if (target < 0 || target >= lay.count) return;   // 目標行が存在しない
+
+    // 最終行より下は無い。何もしないのではなく、行末（= バッファ末尾）へ寄せる。
+    // 最終行の途中にいるとき、末尾まで行くのに → を連打するしかなかったため。
+    // goal_col は捨てる（→ と同じで、明示的に横方向を決め直した扱い）。
+    if (target >= lay.count) {
+        ed->cursor   = ed->len;
+        ed->goal_col = -1;
+        opur_update_scroll(ed);
+        return;
+    }
+
+    if (target < 0) return;   // 先頭行より上は無い。↑ は従来どおり何もしない
 
     if (ed->goal_col < 0) {
         ed->goal_col = opur_cursor_col(ed, &lay, line, ed->cursor);

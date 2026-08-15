@@ -4,8 +4,10 @@
 //   1. view_curses.c ではなく view_m5.c がリンクされる
 //   2. 辞書は SD カードから開く（DICT_PATH）
 //   3. Ctrl+Q が無い。実機ではキーボードから制御コードが取れないため（007 調査）
-//   4. 書きかけを NVS に自動退避し、起動時に復元する（E-2）
-//   5. ESC メニューから SD へ保存できる（E-2）
+//   4. ESC メニューから SD へ保存できる（E-2）
+//
+// 書きかけの NVS 自動退避は 021 で撤去した。保存前に電源を切れば消える
+// （ワープロと同じ）。理由は nvs_save() があった場所の注記に残してある。
 //
 // FEP は C++17 のままなのでこのファイルも C++。それ以外（editor / candidate_bar /
 // conv_utf8 / utf8_utf16 / opur_dict / view_m5）は C11 で、
@@ -28,7 +30,6 @@
 #include <esp_attr.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
-#include <nvs.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -49,19 +50,6 @@ static char s_current_file[16];
 
 // ロードのファイル一覧。64 件あれば十分（256 バイト）。
 #define LOAD_MAX_FILES 64
-
-// 無操作がこれだけ続いたら NVS に退避する。
-//
-// 3 秒だと長時間の執筆で数百回書くことになり、20KB しかない NVS
-// パーティションの GC が頻発する。10 秒でも「電源を切っても書きかけが残る」
-// という目的は変わらない（失うのは最後の 10 秒ぶんまで）。
-#define IDLE_SAVE_MS 10000
-
-// NVS
-#define NVS_NS      "opur"
-#define NVS_K_BUF   "buf"
-#define NVS_K_LEN   "buf_len"
-#define NVS_K_CUR   "cursor"
 
 // CandBar は約 84KB。スタックにも loop() のローカルにも置けないので、
 // 起動時に 1 度だけ確保される静的領域に置く。
@@ -113,9 +101,7 @@ static inline void crumb(uint32_t v) { crumb2(v, 0, 0); }
 #define CRUMB_SETUP_END     14
 #define CRUMB_DRAW          20
 #define CRUMB_GETCH         21
-#define CRUMB_NVS_SAVE      22
-#define CRUMB_NVS_DONE      23
-#define CRUMB_KEY           24
+#define CRUMB_KEY           24   /* 22/23 は NVS 退避用だった。021 で撤去 */
 
 static const char *crumb_text(uint32_t c) {
     switch (c) {
@@ -126,16 +112,7 @@ static const char *crumb_text(uint32_t c) {
     case CRUMB_SETUP_END:   return "setup完了";
     case CRUMB_DRAW:        return "描画中";
     case CRUMB_GETCH:       return "キー待ち";
-    case CRUMB_NVS_SAVE:    return "NVS退避中";
-    case CRUMB_NVS_DONE:    return "NVS退避後";
     case CRUMB_KEY:         return "キー処理中";
-    case 220:               return "NVS: 入口";
-    case 221:               return "NVS: open後";
-    case 222:               return "NVS: blob後";
-    case 223:               return "NVS: len後";
-    case 224:               return "NVS: cur後";
-    case 225:               return "NVS: commit後";
-    case 226:               return "NVS: close後";
     default:                return "?";
     }
 }
@@ -164,12 +141,10 @@ enum Mode { MODE_INPUT, MODE_SELECT, MODE_MENU, MODE_LOG };
 
 static Mode g_mode      = MODE_INPUT;
 static bool g_have_dict = false;
-static bool g_dirty     = false;   // 前回の退避から本文が変わったか
+// 保存していない変更があるか。読込のときに「保存しますか?」と聞くためだけに
+// 使う（021 で NVS 退避を撤去したので、これ以外の用途は無い）。
+static bool g_dirty     = false;
 static int  g_log_top   = 0;       // ログ表示の先頭行
-
-// NVS 退避が失敗した。以後は試さない。
-// 壊れた NVS に書き続けるとパニックを繰り返すため、1 度で見切る。
-static bool g_nvs_dead  = false;
 
 // ---------------------------------------------------------------------------
 // キーマッピング
@@ -247,102 +222,22 @@ static int fep_pending(UTF16* out, int maxlen) {
 }
 
 // ---------------------------------------------------------------------------
-// NVS への自動退避
+// 書きかけの扱い（021 で NVS 退避を撤去した）
 // ---------------------------------------------------------------------------
 //
-// 電源を切っても書きかけが消えないようにする。SD ではなく内蔵 Flash の NVS を
-// 使うのは、SD が挿さっていなくても効いてほしいのと、書き込みが数 ms で済むため。
+// 以前は無操作 10 秒ごとに本文を内蔵 Flash の NVS へ退避し、起動時に戻していた。
+// これをやめて、起動は常に空バッファから始める。保存前に電源を切れば消える。
 //
-// バッファは UTF-16 のまま blob で置く。UTF-8 に直すと復元時に長さの検算が
-// 要るうえ、OPUR_BUF_MAX が文字数で決まっているので素直に対応しない。
-
-// 退避する。失敗しても編集は続けたいので戻り値は返さない。
-// パンくずを細かく打ってある。ここでパニックしているのが分かっているが、
-// どの呼び出しかまでは絞れていないため（実機にシリアルを繋げないので
-// バックトレースが読めない）。原因が判明したら 220 番台は外してよい。
-static void nvs_save(void) {
-    nvs_handle_t h;
-    esp_err_t    e;
-
-    crumb2(220, g_ed.len, g_ed.cursor);
-
-    if (g_nvs_dead || !m5c_nvs_ready()) return;
-
-    e = nvs_open(NVS_NS, NVS_READWRITE, &h);
-    crumb2(221, (int32_t)e, g_ed.len);
-    if (e != ESP_OK) return;
-
-    e = nvs_set_blob(h, NVS_K_BUF, g_ed.buf,
-                     (size_t)g_ed.len * sizeof(g_ed.buf[0]));
-    crumb2(222, (int32_t)e, g_ed.len);
-    if (e != ESP_OK) goto fail;
-
-    e = nvs_set_u16(h, NVS_K_LEN, (uint16_t)g_ed.len);
-    crumb2(223, (int32_t)e, 0);
-    if (e != ESP_OK) goto fail;
-
-    e = nvs_set_u16(h, NVS_K_CUR, (uint16_t)g_ed.cursor);
-    crumb2(224, (int32_t)e, 0);
-    if (e != ESP_OK) goto fail;
-
-    e = nvs_commit(h);
-    crumb2(225, (int32_t)e, 0);
-    if (e != ESP_OK) goto fail;
-
-    nvs_close(h);
-    crumb2(226, 0, 0);
-    return;
-
-fail:
-    // 一度でも失敗したら以後あきらめる。編集そのものは続けられる。
-    nvs_close(h);
-    g_nvs_dead = true;
-    opur_log_add("NVS退避を停止 err=%d", (int)e);
-}
-
-// 退避内容を消す。保存し終えたときと「新規」のとき。
-static void nvs_clear(void) {
-    nvs_handle_t h;
-
-    if (!m5c_nvs_ready()) return;
-    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
-
-    nvs_erase_key(h, NVS_K_BUF);
-    nvs_erase_key(h, NVS_K_LEN);
-    nvs_erase_key(h, NVS_K_CUR);
-    nvs_commit(h);
-    nvs_close(h);
-}
-
-// 起動時の復元。復元したら true。
-static bool nvs_restore(void) {
-    nvs_handle_t h;
-    uint16_t len = 0, cur = 0;
-    size_t   blob_size = sizeof(g_ed.buf);
-    bool     ok = false;
-
-    if (!m5c_nvs_ready()) return false;
-    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return false;
-
-    if (nvs_get_u16(h, NVS_K_LEN, &len) == ESP_OK && len > 0 &&
-        len <= OPUR_BUF_MAX &&
-        nvs_get_blob(h, NVS_K_BUF, g_ed.buf, &blob_size) == ESP_OK &&
-        blob_size == (size_t)len * sizeof(g_ed.buf[0])) {
-
-        g_ed.len = (int)len;
-
-        // カーソルは壊れていても致命的ではないので範囲に丸めるだけ
-        if (nvs_get_u16(h, NVS_K_CUR, &cur) != ESP_OK) cur = len;
-        g_ed.cursor = (cur <= len) ? (int)cur : (int)len;
-
-        g_ed.goal_col = -1;
-        opur_update_scroll(&g_ed);
-        ok = true;
-    }
-
-    nvs_close(h);
-    return ok;
-}
+// 撤去した理由は、NVS の書き込み自体がパニックの発生源になっていたため。
+// nvs_open() が内部ミューテックスを取る時点で assert に当たっており
+// （xQueueSemaphoreTake の uxItemSize == 0）、データの問題ではないので
+// パーティションを消しても直らなかった。復旧のために置いていた
+// m5c_nvs_reset() が nvs_flash_deinit() を呼ぶこと自体を疑っているが、
+// 確証は無い。詳細は claude-store/opur/2026-08-15_nvs_panic_investigation.md。
+//
+// 守れる範囲が「最後の 10 秒を除く書きかけ」しかないのに対して、
+// 失敗すると起動のたびに落ちる。割に合わないと判断した。
+// 保存したものは SD にあり、読込で取り戻せる。
 
 // ---------------------------------------------------------------------------
 // SD への保存
@@ -437,13 +332,12 @@ static int load_from_sd(const char *fname) {
     return 1;
 }
 
-// 本文と退避内容を捨てて新規状態にする。
+// 本文を捨てて新規状態にする。
 // 開いていたファイルも忘れる（次の保存は新しい番号になる）。
 static void start_new(void) {
     opur_init(&g_ed);
     g_fep.ClearMode();
     cand_bar_clear(&g_bar);
-    nvs_clear();
     g_dirty = false;
     s_current_file[0] = '\0';
 }
@@ -458,9 +352,7 @@ static int ask(const char *l1, const char *l2) {
     if (l2) mvaddstr(3, 0, l2);
     refresh();
 
-    timeout(-1);            // ここは待ち切る
     ch = getch();
-    timeout(IDLE_SAVE_MS);
     return ch;
 }
 
@@ -472,9 +364,7 @@ static void notice(const char *l1, const char *l2) {
     mvaddstr(5, 0, "キーを押すと戻ります");
     refresh();
 
-    timeout(-1);            // ここは待ち切る
     getch();
-    timeout(IDLE_SAVE_MS);
 }
 
 // 辞書が開けなかったときに理由を出す。文字種変換だけなら辞書なしでも動くので、
@@ -520,9 +410,10 @@ static void flash_status(const char *l1, const char *l2, int ms) {
     refresh();
 
     // キーを押せばすぐ飛ばせる（getch は溜まっていれば待たずに返る）。
+    // ここだけが待ち時間を触るので、出るときに既定（待ち切る）へ戻す。
     timeout(ms);
     getch();
-    timeout(IDLE_SAVE_MS);
+    timeout(-1);
 }
 
 static void boot_wifi(void) {
@@ -759,9 +650,7 @@ static void do_load(void) {
         m5c_separator();
         refresh();
 
-        timeout(-1);            // 選んでいる間は待ち切る
         ch = getch();
-        timeout(IDLE_SAVE_MS);
 
         if (ch == KEY_LEFT)  { sel = (sel + count - 1) % count; continue; }
         if (ch == KEY_RIGHT) { sel = (sel + 1) % count;         continue; }
@@ -774,8 +663,7 @@ static void do_load(void) {
             g_fep.ClearMode();
             cand_bar_clear(&g_bar);
 
-            // 保存と同じ理由で nvs_save() はしない。読み込んだ内容は
-            // SD にあるので、失っても開き直せる。
+            // 読み込んだ直後は SD の中身と一致している。
             g_dirty = false;
             return;
         }
@@ -831,32 +719,37 @@ static void do_send(void) {
     }
 }
 
+// 保存して結果を知らせる。save_to_sd() の戻り値をそのまま返す。
+// メニューの '1' と Fn+S の両方から呼ぶので、モードには触らない
+// （メニューを閉じるかどうかは呼び出し側の都合）。
+//
+// 保存しても本文は残す。開いているファイルを編集し続けられないと
+// 「上書き保存」に意味が無い。新規に戻したいときはメニューの '2'。
+static int do_save(void) {
+    const int r = save_to_sd();
+
+    switch (r) {
+    case 1:
+        g_dirty = false;
+        notice("保存しました", s_current_file);
+        break;
+    case 0:
+        // 空ファイルは作らない
+        notice("本文が空です", "保存しませんでした");
+        break;
+    default:
+        notice("保存できません", m5c_sd_ready() ? OPUR_DIR : "SD が読めません");
+        break;
+    }
+    return r;
+}
+
 // メニュー表示中のキー処理。
 static void menu_key(int ch) {
     switch (ch) {
     case '1':
-        // 保存しても本文は残す。開いているファイルを編集し続けられないと
-        // 「上書き保存」に意味が無い。新規に戻したいときは '2'。
-        switch (save_to_sd()) {
-        case 1:
-            // ここで nvs_save() はしない。保存できた内容は SD にあるので
-            // NVS で守る必要がなく、編集を再開すれば dirty になって
-            // どのみち 10 秒後に退避される。
-            // NVS は書き込みの途中で電源が飛ぶとページが壊れ、以後
-            // 書くたびにパニックする（nvs_save() の注記を参照）。
-            // 守れるものが増えないなら、書きにいく回数は減らしておく。
-            g_dirty = false;
-            g_mode = MODE_INPUT;
-            notice("保存しました", s_current_file);
-            break;
-        case 0:
-            // 空ファイルは作らない。メニューは開いたままにして意図を伝える
-            notice("本文が空です", "保存しませんでした");
-            break;
-        default:
-            notice("保存できません", m5c_sd_ready() ? OPUR_DIR : "SD が読めません");
-            break;
-        }
+        // 失敗したときはメニューを開いたままにして、やり直せることを伝える
+        if (do_save() == 1) g_mode = MODE_INPUT;
         break;
 
     case '2':
@@ -905,7 +798,7 @@ void setup() {
 
     opur_init(&g_ed);
 
-    view_init();                 // 中で initscr() → SD.begin() → NVS 初期化まで済む
+    view_init();                 // 中で initscr() → SD.begin() まで済む
     crumb(CRUMB_VIEW_READY);
 
     opur_log_clear();
@@ -916,18 +809,8 @@ void setup() {
         opur_log_add("前回 %s", reset_text(reset_reason));
         opur_log_add("落ちた場所 %u %s", prev_crumb, crumb_text(prev_crumb));
         opur_log_add("  a=%ld b=%ld", (long)prev_a, (long)prev_b);
-
-        // NVS の書き込み中に落ちていた場合、ページが半端な状態で残って
-        // 次の書き込みでも同じ場所でパニックする（クラッシュの自己再生産）。
-        // 抜け出すには消して作り直すしかない。書きかけは失われるが、
-        // 起動のたびに落ちる状態よりはましと判断する。
-        if (prev_crumb >= 220 && prev_crumb <= 226) {
-            opur_log_add("NVS を作り直します");
-            opur_log_add("NVS 再構築 %s", m5c_nvs_reset() ? "OK" : "失敗");
-        }
     }
     opur_log_add("SD: %s",  m5c_sd_ready()  ? "OK" : "マウント失敗");
-    opur_log_add("NVS: %s", m5c_nvs_ready() ? "OK" : "NG");
 
     // PSRAM。0K なら載っていない = HTTPS が張れない（TLS に 40〜50KB 要る）。
     // platformio.ini の memory_type と BOARD_HAS_PSRAM が対で要る。
@@ -946,11 +829,11 @@ void setup() {
     boot_wifi();
     crumb(CRUMB_WIFI_DONE);
 
-    // 電源を切る前の書きかけを戻す。復元直後は退避済みなので dirty にしない。
-    nvs_restore();
+    // 起動は常に空バッファから。前回の書きかけは復元しない（021）。
     g_dirty = false;
 
-    timeout(IDLE_SAVE_MS);
+    // 定期的に起きる理由が無くなったので、キーが来るまで待ち切る。
+    timeout(-1);
     crumb(CRUMB_SETUP_END);
 }
 
@@ -964,6 +847,14 @@ static void handle_key(int ch) {
     // --- メニュー表示中 ---
     if (g_mode == MODE_MENU) {
         menu_key(ch);
+        return;
+    }
+
+    // --- Fn+S: 保存のショートカット ---
+    // ESC → 1 と同じ。入力中だけ効かせる。変換中（MODE_SELECT）に割り込むと
+    // 未確定の読みをどう扱うかを決めなければならず、旨みに合わない。
+    if (ch == KEY_SAVE) {
+        if (g_mode == MODE_INPUT) do_save();
         return;
     }
 
@@ -1060,27 +951,27 @@ void loop() {
     crumb(CRUMB_GETCH);
     int ch = getch();
 
-    // 無操作が続いた。変わっていれば退避する（数 ms なので気づかれない）
-    if (ch == ERR) {
-        if (g_dirty) {
-            crumb(CRUMB_NVS_SAVE);
-            nvs_save();
-            crumb(CRUMB_NVS_DONE);
-            g_dirty = false;
-        }
-        return;
-    }
+    // timeout(-1) なので普段は来ないが、flash_status() の待ちが明けた直後など
+    // ERR が返ることはある。描き直して待ち直すだけ。
+    if (ch == ERR) return;
 
-    // 本文かカーソルが実際に動いたときだけ dirty にする。
-    // 「キーが来たら dirty」にすると、候補を眺めただけ・メニューを開いただけでも
-    // 退避が走ってしまう。前後を見比べるほうが確実で行数も少ない。
+    // 本文が実際に増減したときだけ dirty にする。
+    // 「キーが来たら dirty」にすると、候補を眺めただけでも未保存扱いになり、
+    // 読込のたびに「保存しますか?」が出る。
+    //
+    // 本文を変えるのは opur_insert() と opur_backspace() だけで、
+    // どちらも必ず len が動く。カーソル移動は見なくてよい。
+    //
+    // ただしメニューから来たときは触らない。新規・読込・保存はどれも
+    // len を大きく動かすが、それは「編集した」ではないし、
+    // 各処理が自分で g_dirty を決めている（ここで上書きすると台無しになる）。
     {
-        const int before_len = g_ed.len;
-        const int before_cur = g_ed.cursor;
+        const int  before_len  = g_ed.len;
+        const Mode before_mode = g_mode;
 
         crumb(CRUMB_KEY);
         handle_key(ch);
 
-        if (g_ed.len != before_len || g_ed.cursor != before_cur) g_dirty = true;
+        if (before_mode != MODE_MENU && g_ed.len != before_len) g_dirty = true;
     }
 }
