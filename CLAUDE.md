@@ -10,7 +10,7 @@ M5Cardputer で動く日本語入力・編集ツール。オフラインで完�
 
 ## 実機のハード構成（実測）
 
-**思い込みで型番を決めないこと。** 必ず実機から読む。
+開発機は **Cardputer ADV**。ただし **ADV でも PSRAM は載っていない**。
 
 ```
 $ pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 \
@@ -23,13 +23,22 @@ Detected flash size: 8MB
 
 つまり **ESP32-S3FN8（Flash 8MB 内蔵・PSRAM なし）**。
 
-- **PSRAM は積んでいない。** 8MB PSRAM を持つのは **Cardputer ADV** のほう
-- `board_build.arduino.memory_type = qio_opi` + `-DBOARD_HAS_PSRAM` を入れても
-  実行時の `MALLOC_CAP_SPIRAM` は **0K** のまま。試して確認済みなので繰り返さない
+- **PSRAM は積んでいない。** `board_build.arduino.memory_type = qio_opi` +
+  `-DBOARD_HAS_PSRAM` を入れても実行時の `MALLOC_CAP_SPIRAM` は **0K** のまま。
+  試して確認済みなので繰り返さない
 - 内部 DRAM 約 320KB がすべて。静的に約 151KB 使っている
 
-2026-08-15 に、型番を N16R8（＝ADV 相当）と思い込んで PSRAM 有効化を試し、
-1 往復ぶん無駄にした。**ハード前提は最初に esptool で確認する。**
+**「PSRAM が無い ＝ 無印」ではない。** 無印 / v1.1 / ADV はどれも
+ESP32-S3FN8 で、LCD（ST7789V2 240x135）もキー配列も同じ。ADV で増えるのは
+バッテリー（1750mAh 一体型）・オーディオ（ES8311 + 3.5mm）・IMU（BMI270）で、
+このプロジェクトが使うのは LCD / キーボード / SD / WiFi だけなので
+**無印・v1.1 でもそのまま動く見込みが高い**（未検証）。
+
+2026-08-15 に 2 回間違えた。1 回目は型番を N16R8（PSRAM 8MB）と思い込んで
+有効化を試し、1 往復無駄にした。2 回目はその反動で
+「PSRAM が無いから ADV ではない」と推論して README に誤りを書きかけた。
+**ハード前提は最初に esptool で確認し、そこから分からないこと
+（外装・周辺デバイス）はマスターに聞く。**
 
 ## メモリの余裕が無い（HTTPS を触るとき必読）
 
