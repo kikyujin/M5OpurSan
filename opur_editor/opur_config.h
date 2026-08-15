@@ -10,7 +10,7 @@
 // フォーマット（実機の SD にあるものと同じ）:
 //   WIFI_SSID=MyWiFi
 //   WIFI_PASS=xxxxx
-//   ENDPOINT_URL=https://eqiden.com/t/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+//   ENDPOINT_URL=https://eqiden.com/<64 桁の16進トークン>
 //   OPUR_HOST=192.168.1.100
 //   OPUR_PORT=9500
 //   DANTONG_HOST=192.168.1.101
@@ -26,9 +26,9 @@ extern "C" {
 // 1 つの値の最大長。SSID・パスフレーズとも WPA2 の上限が 63 文字なので +1。
 #define OPUR_CFG_VAL_MAX 64
 
-// URL 1 本の最大長。ENDPOINT_URL は "https://eqiden.com/t/" + UUID で 57 文字
-// あり、OPUR_CFG_VAL_MAX（64）では余白がほとんど無い。ホスト名やパスが
-// 少し伸びただけで黙って切り詰められるので、URL だけ別枠にしてある。
+// URL 1 本の最大長。ENDPOINT_URL は "https://eqiden.com/" + 64 桁トークンで
+// 83 文字あり、OPUR_CFG_VAL_MAX（64）には**入らない**。
+// set_str() は黙って切り詰めるだけなので、URL は別枠にしてある。
 #define OPUR_CFG_URL_MAX 160
 
 // 1 行の最大長。key= と値、改行、終端で足りる長さ。

@@ -21,4 +21,9 @@ WIFI_PASS=your-passphrase
 # 相手が引き取るまでは送らないので、この行を消しても書いたものは
 # SD に残り続ける。WiFi が無い場所では黙って送信を飛ばす。
 #
-# ENDPOINT_URL=https://eqiden.com/t/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+# URL は EQIDEN が発行する「https://eqiden.com/ + 64桁の16進トークン」。
+# 手元で試すなら:
+#   curl -s URL                      … 中身を見る（空なら送信可）
+#   curl -X PUT -d "" URL            … 引き取って空に戻す
+#
+# ENDPOINT_URL=https://eqiden.com/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef

@@ -618,7 +618,7 @@ static void log_key(int ch) {
 static void send_after_save(void) {
     switch (opur_net_try_send()) {
     case 1:  flash_status("sent!",    NULL, FLASH_MS); break;
-    case -1: flash_status("send err", "ﾛｸﾞ(ESC-4)に理由", FLASH_MS); break;
+    case -1: flash_status("send err", "ログ(ESC-4)に理由", FLASH_MS); break;
     default: break;   // 0 = 送る条件が揃っていない。通常運用なので黙る
     }
 }
@@ -652,10 +652,10 @@ static void menu_key(int ch) {
         break;
 
     case '3':
-        // ロードは 020 で実装する。項目だけ先に出してあるので、
+        // 読込は 020 で実装する。項目だけ先に出してあるので、
         // 押しても何も起きないと壊れて見える。一言返して戻る。
         g_mode = MODE_INPUT;
-        flash_status("ﾛｰﾄﾞは未実装です", NULL, FLASH_MS);
+        flash_status("読込は未実装です", NULL, FLASH_MS);
         break;
 
     case '4':
