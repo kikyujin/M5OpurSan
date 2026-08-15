@@ -113,7 +113,7 @@ int opur_wifi_connect(const OpurConfig *cfg) {
     return opur_wifi_is_connected();
 }
 
-int opur_wifi_ntp_sync(void) {
+int opur_wifi_ntp_sync(uint32_t timeout_ms) {
     struct tm t;
 
     if (g_ntp_done) return 1;
@@ -131,7 +131,7 @@ int opur_wifi_ntp_sync(void) {
     // 同期できたかは getLocalTime() の戻り値で判定する。
     // 中で tm_year > 2016 を見ているので、指示の「2026 年以降か」を
     // 自前で書くより確実（RTC 未設定なら 1970 年のままになる）。
-    const bool ok = getLocalTime(&t, OPUR_NTP_TIMEOUT_MS);
+    const bool ok = getLocalTime(&t, timeout_ms);
 
     opur_log_add("ntp %s %ums (gw %s)", ok ? "OK" : "NG",
                  (unsigned)(millis() - start), gw.c_str());
@@ -144,6 +144,11 @@ int opur_wifi_ntp_sync(void) {
 
 int opur_wifi_ntp_synced(void) {
     return g_ntp_done ? 1 : 0;
+}
+
+int opur_wifi_last_pending(void) {
+    return (g_last_status == WL_IDLE_STATUS ||
+            g_last_status == WL_DISCONNECTED) ? 1 : 0;
 }
 
 const char *opur_wifi_ip(void) {

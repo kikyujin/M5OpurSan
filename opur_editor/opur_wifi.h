@@ -44,7 +44,10 @@ int opur_wifi_is_connected(void);
 
 // NTP 同期。未接続なら何もせず 0、同期済みなら即 1。
 // 二重同期しないようフラグを内部に持つ。
-int opur_wifi_ntp_sync(void);
+//
+// timeout_ms は応答を待つ上限。起動時は何も届いていない前提で長めに取るが、
+// あとから拾い直すときは画面が止まるので短くする。
+int opur_wifi_ntp_sync(uint32_t timeout_ms);
 
 // 一度でも同期できていれば 1。
 int opur_wifi_ntp_synced(void);
@@ -60,6 +63,13 @@ const char *opur_wifi_ip(void);
 //   elapsed 接続待ちに実際かかった ms。タイムアウト値の見直しに使う
 int      opur_wifi_last_status(void);
 uint32_t opur_wifi_elapsed_ms(void);
+
+// 直前の接続が「失敗」ではなく「待ち時間内に間に合わなかっただけ」なら 1。
+//
+// **WiFi.begin() は非同期。** こちらが待つのをやめても裏では試行が続くので、
+// 時間切れで抜けた直後に繋がることがある。SSID が無い・鍵が違うといった
+// はっきりした失敗と、これを混ぜて「NG」と言わないための判定。
+int opur_wifi_last_pending(void);
 
 // 直近の切断理由（wifi_err_reason_t の生値）。status() は WL_DISCONNECTED に
 // 丸めてしまい「AP が無い」と「鍵が違う」を区別できないので、こちらを見る。

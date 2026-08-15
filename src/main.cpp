@@ -442,6 +442,16 @@ static void warn_no_dict(void) {
 
 #define BOOT_STATUS_MS 2000
 
+// 起動時に間に合わなかった WiFi を、あとから拾い直すための状態。
+//
+//   s_wifi_logged  「繋がった」をログに書いたか（二重に書かないため）
+//   s_ntp_tries    遅延 NTP の試行回数。届かない環境で毎回待たされないよう打ち切る
+static bool s_wifi_logged = false;
+static int  s_ntp_tries   = 0;
+
+#define NTP_LATE_TRIES      3
+#define NTP_LATE_TIMEOUT_MS 2000
+
 // 知らせを出しておく時間（ms）。読み落としても実害が無いものに使う。
 // 詳しい理由は隠しの「5 ログ」に残っている。
 #define FLASH_MS 1000
@@ -499,19 +509,27 @@ static void boot_wifi(void) {
     if (!opur_wifi_connect(&g_cfg)) {
         // 切り分けの詳細（スキャン・理由コード）は opur_wifi 側がログに残す。
         // ここは 2 行に収まるぶんだけ出す。
-        const int r = opur_wifi_last_reason();
+        const int  r    = opur_wifi_last_reason();
+        const bool wait = opur_wifi_last_pending();
 
-        snprintf(l1, sizeof(l1), "WiFi NG st=%d %ums",
+        // **「NG」と言い切らない。** WiFi.begin() は非同期なので、
+        // 待ち時間内に間に合わなかっただけで、このあと繋がることがある
+        // （実際そうなり、送信は通るのにログだけ NG のままになっていた）。
+        // 後始末は wifi_catch_up() がやる。
+        snprintf(l1, sizeof(l1), "WiFi %s st=%d %ums",
+                 wait ? "待ち" : "NG",
                  opur_wifi_last_status(), (unsigned)opur_wifi_elapsed_ms());
         snprintf(l2, sizeof(l2), "理由%d %s", r, opur_wifi_reason_text(r));
 
-        opur_log_add("wifi NG st=%d 計%ums",
+        opur_log_add("wifi %s st=%d 計%ums",
+                     wait ? "時間切れ(継続中)" : "NG",
                      opur_wifi_last_status(),
                      (unsigned)opur_wifi_elapsed_ms());
         opur_log_add("heap %u>%uK",
                      (unsigned)(opur_wifi_heap_before() / 1024),
                      (unsigned)(opur_wifi_heap_after()  / 1024));
     } else {
+        s_wifi_logged = true;
         snprintf(l1, sizeof(l1), "WiFi OK %s", opur_wifi_ip());
         opur_log_add("wifi OK %s", opur_wifi_ip());
         opur_log_add("接続 %ums", (unsigned)opur_wifi_elapsed_ms());
@@ -519,7 +537,7 @@ static void boot_wifi(void) {
                      (unsigned)(opur_wifi_heap_before() / 1024),
                      (unsigned)(opur_wifi_heap_after()  / 1024));
 
-        if (opur_wifi_ntp_sync()) {
+        if (opur_wifi_ntp_sync(OPUR_NTP_TIMEOUT_MS)) {
             time_t    now = time(NULL);
             struct tm t;
             char      stamp[24];
@@ -548,6 +566,31 @@ static void boot_wifi(void) {
     // ついでにキーを押せばすぐ飛ばせる（getch は溜まっていれば待たずに返す）。
     timeout(BOOT_STATUS_MS);
     getch();
+}
+
+// 起動時に間に合わなかった WiFi を拾い直す。無操作の再描画から呼ぶ。
+//
+// 送信は毎回 opur_net_check() が WiFi.status() を見るので、繋がりさえすれば
+// 動く。残るのは次の 2 つで、どちらも起動時に 1 度きりの判定に引きずられる:
+//   - ログが「NG」のままになり、実態と食い違う
+//   - NTP が一度も走らず、右下の時計がいつまでも出ない
+//
+// ブロックするのは NTP の待ちだけ。起動時の 8 秒は「まだ何も届いていない」
+// 前提の値なので、ここでは短く聞いて画面を止めない。
+static void wifi_catch_up(void) {
+    if (!opur_config_has_wifi(&g_cfg))        return;   // そもそも使わない
+    if (s_wifi_logged && opur_wifi_ntp_synced()) return; // やることが無い
+    if (!opur_wifi_is_connected())            return;   // まだ。次の周回で見る
+
+    if (!s_wifi_logged) {
+        s_wifi_logged = true;
+        opur_log_add("wifi 遅れてOK %s", opur_wifi_ip());
+    }
+
+    if (!opur_wifi_ntp_synced() && s_ntp_tries < NTP_LATE_TRIES) {
+        s_ntp_tries++;
+        opur_wifi_ntp_sync(NTP_LATE_TIMEOUT_MS);   // 結果は opur_wifi 側がログに残す
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,9 +1106,12 @@ void loop() {
     crumb(CRUMB_GETCH);
     int ch = getch();
 
-    // 無操作のまま IDLE_REDRAW_MS 過ぎた。何もせず戻る——次の周回の
-    // view_draw() で時計が描き直される。
-    if (ch == ERR) return;
+    // 無操作のまま IDLE_REDRAW_MS 過ぎた。次の周回の view_draw() で
+    // 時計が描き直される。起動時に間に合わなかった WiFi もここで拾う。
+    if (ch == ERR) {
+        wifi_catch_up();
+        return;
+    }
 
     // 本文が実際に増減したときだけ dirty にする。
     // 「キーが来たら dirty」にすると、候補を眺めただけでも未保存扱いになり、
