@@ -109,29 +109,61 @@ while True:
 `~/.platformio/penv/bin/python` に pyserial が入っている。
 読むときは `tr -d '\r'` を通すと日本語がそのまま読める。
 
-## NVS は壊れることがある（そして自分で直る）
+`s.setRTS(True)` → `False` で EN を叩けば、繋いだまま起動しなおさせられる
+（esptool と同じ classic reset）。起動ログを頭から取りたいときに使う。
 
-書きかけの自動退避に内蔵 Flash の NVS を使っている。**書き込みの途中で電源が
-飛ぶとページが半端な状態で残り、以後 `nvs_set_blob()` を呼ぶたびに
-ESP-IDF 内部の assert でパニックする**（クラッシュの自己再生産）。
+### パニックしたらコアダンプを読む（パンくずより速くて正確）
 
-抜け道は `setup()` に入っている。パンくずが 220〜226（NVS 書き込み中）なら
-`m5c_nvs_reset()` で全消去して作り直す。**一度パニックするが次の起動で復帰する。**
+sdkconfig でコアダンプが Flash に保存される設定になっている
+（`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH` / `..._DATA_FORMAT_ELF`、
+パーティションは `0x7f0000` に 64K）。**関数名と行番号まで分かる。**
 
-2026-08-15 に実際に踏んだ。症状は「上書き保存でリセット」「送信後しばらくして
-リセット」で、パンくずは `221 NVS: open後 a=0`（＝ open は成功、`nvs_set_blob`
-の中で落ちた）。原因は開発中に何度も焼いたことと見ている。無操作 10 秒ごとに
-退避が走るので、`pio run -t upload` のリセットと噛むと「書き込み中の電源断」に
-なる。通常運用ではめったに当たらない。
+`esp-coredump` は ESP-IDF 環境を要求してくるので使えない。先頭 20 バイトが
+メタデータで、その後ろがそのまま ELF なので自分で切り出す:
+
+```bash
+# シリアル監視は止めてから（ポートが競合する）
+pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 \
+  --port /dev/cu.usbmodem83201 read_flash 0x7f0000 0x8000 core_full.bin
+
+python3 -c "
+import struct
+d=open('core_full.bin','rb').read()
+size=struct.unpack('<I', d[0:4])[0]
+open('core.elf','wb').write(d[20:size])
+"
+
+~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-gdb \
+  -batch -q .pio/build/m5stack-cardputer/firmware.elf core.elf -ex "bt"
+```
+
+`firmware.elf` は**そのとき焼いたもの**でないとアドレスが合わない。
+
+## NVS には自分から書かない（021 で退避を撤去した）
+
+書きかけを NVS に自動退避していたが、**その書き込み自体がパニックの発生源**
+だったので 021 でまるごとやめた。いまアプリから NVS を読み書きする箇所は無い。
+
+落ちていたのは `nvs_open()` が内部ミューテックスを取る時点:
+
+```
+assert failed: xQueueSemaphoreTake queue.c:1549 (pxQueue->uxItemSize == 0)
+  nvs::Lock::Lock  →  nvs_open_from_partition  →  nvs_open  →  nvs_save
+```
+
+**データの破損ではない。** `esptool erase_region 0x9000 0x5000` で
+NVS を全消去しても再発した。壊れているのはロックオブジェクトのほう。
+復旧のために置いていた `m5c_nvs_reset()`（`nvs_flash_deinit()` を呼ぶ）を
+疑っているが、確証は取っていない。詳細は
+`~/claude-store/opur/2026-08-15_nvs_panic_investigation.md`。
 
 **予防的に NVS を作り直すのは避けること。** `nvs_flash_erase()` はパーティション
 全体を消すので、ESP-IDF が持つ **WiFi のキャリブレーション情報も一緒に消える**。
 実際に接続時間が 650ms → 2500ms に伸びた（`OPUR_WIFI_TIMEOUT_MS` は 3000）。
-Flash の消去回数も食うし、再構築自体が書き込みなので予防にもなっていない。
+数回の接続で戻る。
 
-減らすべきなのは**書きにいく回数**のほう。SD に保存した直後やロード直後は
-内容が SD にあるので、そこで退避しても守れるものは増えない（020 で一度足して
-から外した）。
+`nvs_flash_init()` を自前で呼ぶ必要も無い。Arduino の `initArduino()` が
+`setup()` より前に同じ手順（壊れていたら消して再 init）を済ませている。
 
 ## 送信（opur_net）の設計
 
