@@ -105,7 +105,7 @@ ESC → `0` で開き、`#` を付け替えて保存する。**保存・新規�
 
 ## 送信（EQIDEN 連携）
 
-M5OpurSan は config.txt に書かれた URL にテキストを PUT する。推奨は EQIDEN（https://eqiden.com）。
+M5OpurSan は config.txt に書かれた URL にテキストを PUT する。推奨は EQIDEN。
 
 保存と送信は別の操作。保存は SD に書くだけ。送信するかどうかはあなたが決める。
 
