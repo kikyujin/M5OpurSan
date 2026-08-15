@@ -42,6 +42,21 @@ void opur_log_add(const char *fmt, ...) {
         dst[n] = '\0';
     }
 
+    // 実機ではシリアルにも流す。画面は 30 桁 x 7 行しか無く長い行は右が切れるので、
+    // 切り分け中はホスト側で全文を読めたほうが早い。
+    //
+    // **出る先は UART0（GPIO43/44）で、USB ではない。**
+    // ARDUINO_USB_CDC_ON_BOOT=1 が効くのは Serial オブジェクトだけで、
+    // stdout は sdkconfig の CONFIG_ESP_CONSOLE_UART_DEFAULT に従う
+    // （USB ケーブルを挿しただけでは読めない。実機で確認済み）。
+    // USB 側で読みたくなったら Serial.print を使う層をかぶせること。
+    //
+    // 誰も繋いでいなければ捨てられるだけで、実機側は止まらない。
+#ifdef ESP_PLATFORM
+    printf("%s\n", dst);
+    fflush(stdout);
+#endif
+
     g_total++;
 }
 

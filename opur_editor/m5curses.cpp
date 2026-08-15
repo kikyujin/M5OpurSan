@@ -40,9 +40,11 @@ M5Canvas *g_canvas = nullptr;
 // SD マウントと NVS 初期化はこの裏で走るので、実際の待ちはこれより短い。
 constexpr uint32_t kSplashMs = 1500;
 
-// 通常時の色。A_REVERSE のときは入れ替えて使う。
-constexpr uint16_t kFg = TFT_WHITE;
-constexpr uint16_t kBg = TFT_BLACK;
+// Canvas は 1bpp なので、これは色そのものではなくパレット番号。
+// 実際の色は canvas_alloc() の setPaletteColor で入れる。
+// A_REVERSE のときは入れ替えて使う。
+constexpr uint16_t kFg = 1;
+constexpr uint16_t kBg = 0;
 
 int g_attrs = A_NORMAL;
 
@@ -51,6 +53,32 @@ bool g_nvs_ok = false;
 
 inline uint16_t fg() { return (g_attrs & A_REVERSE) ? kBg : kFg; }
 inline uint16_t bg() { return (g_attrs & A_REVERSE) ? kFg : kBg; }
+
+// スプライトを確保して、描画に必要な設定を入れる。取れなければ false。
+bool canvas_alloc(M5Canvas *c) {
+    // 1bpp。この画面は前景・背景の 2 色しか使わないので、階調は要らない。
+    //
+    // 8bpp（1 ピクセル 1 バイト）だと 240x135 = 32KB を起動から終了まで
+    // 握りっぱなしになる。この機体は PSRAM を積んでいない ESP32-S3FN8 で、
+    // WiFi 接続後の内部ヒープは 44KB しか残らず、TLS ハンドシェイクに要る
+    // 45〜50KB が作れなかった（実機で GET -1 を確認）。
+    // 1bpp なら 4KB で済み、28KB がまるごと空く。
+    c->setColorDepth(1);
+
+    // 画面まるごと確保する。下端の余白も clear() で消えてほしいため。
+    if (!c->createSprite(M5C_SCREEN_W, M5C_SCREEN_H)) return false;
+
+    // パレット。kBg = 黒、kFg = 白。A_REVERSE はこの 2 つを入れ替えるだけ。
+    c->setPaletteColor(kBg, 0, 0, 0);
+    c->setPaletteColor(kFg, 255, 255, 255);
+
+    c->setFont(&fonts::efontJA_16);   // 東雲 16px（JIS 第二水準まで）
+    c->setTextSize(1);
+    c->setTextWrap(false);            // 折り返しは呼び出し側の責任
+    c->setTextColor(kFg, kBg);
+    c->fillSprite(kBg);
+    return true;
+}
 
 // 行の先頭 y 座標（px）。仕切り線より下の行は 1px ぶん下にずれる。
 inline int row_y(int row) {
@@ -118,18 +146,15 @@ void initscr(void) {
         if (elapsed < kSplashMs) delay(kSplashMs - elapsed);
     }
 
-    d.fillScreen(kBg);
+    d.fillScreen(TFT_BLACK);
 
     g_canvas = new M5Canvas(&d);
-    g_canvas->setColorDepth(8);
-    // 画面まるごと確保する。下端の余白も clear() で消えてほしいため。
-    g_canvas->createSprite(M5C_SCREEN_W, M5C_SCREEN_H);
-
-    g_canvas->setFont(&fonts::efontJA_16);   // 東雲 16px（JIS 第二水準まで）
-    g_canvas->setTextSize(1);
-    g_canvas->setTextWrap(false);            // 折り返しは呼び出し側の責任
-    g_canvas->setTextColor(kFg, kBg);
-    g_canvas->fillSprite(kBg);
+    if (!canvas_alloc(g_canvas)) {
+        // ここで失敗したら以降の描画はすべて no-op になる（各関数の先頭で
+        // g_canvas を見ている）。表示は出ないが、起動は止めない。
+        delete g_canvas;
+        g_canvas = nullptr;
+    }
 }
 
 void endwin(void) {

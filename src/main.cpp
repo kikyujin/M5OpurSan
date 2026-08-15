@@ -26,6 +26,7 @@
 
 #include <dirent.h>
 #include <esp_attr.h>
+#include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <nvs.h>
 #include <stdio.h>
@@ -711,6 +712,11 @@ void setup() {
     }
     opur_log_add("SD: %s",  m5c_sd_ready()  ? "OK" : "マウント失敗");
     opur_log_add("NVS: %s", m5c_nvs_ready() ? "OK" : "NG");
+
+    // PSRAM。0K なら載っていない = HTTPS が張れない（TLS に 40〜50KB 要る）。
+    // platformio.ini の memory_type と BOARD_HAS_PSRAM が対で要る。
+    opur_log_add("PSRAM %uK",
+                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 
     g_have_dict = (opur_dict_open(&g_dict, DICT_PATH) == 0);
     cand_bar_init(&g_bar, g_have_dict ? &g_dict : NULL, &g_conv);

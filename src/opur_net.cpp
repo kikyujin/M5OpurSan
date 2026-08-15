@@ -21,6 +21,7 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <esp_heap_caps.h>
 
 #include <dirent.h>
 #include <stdio.h>
@@ -46,6 +47,85 @@ static char s_endpoint[OPUR_NET_URL_MAX];
 
 // 送信するファイルの中身。1.5KB あるので loop タスクの 8KB スタックには置かない。
 static char s_body[NET_FILE_MAX];
+
+// ---------------------------------------------------------------------------
+// 切り分け用のログ
+// ---------------------------------------------------------------------------
+//
+// 接続の失敗（HTTPClient の -1）は「繋がらなかった」としか言わないので、
+// それだけでは DNS・ヒープ・TLS のどれが原因か分からない。実機にシリアルを
+// 常時繋げない以上、失敗した瞬間の材料は自分で残すしかない。
+
+// 空きヒープと**最大連続ブロック**。
+//
+// mbedTLS は受信バッファに 16KB 前後の連続領域を要求する。総量が足りていても
+// 断片化して大きな塊が取れないと接続できない。この機体は CandBar 84KB と
+// Canvas 32KB を静的に持っているので、総量より塊のほうが効きやすい。
+// 内部 RAM と PSRAM を分けて出す。PSRAM が効いていないと外部側が 0 になり、
+// 「設定したのに載っていない」がすぐ分かる。
+static void log_heap(const char *tag) {
+    opur_log_add("%s 内%uK 塊%uK 外%uK", tag,
+                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                 (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
+                            / 1024),
+                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+}
+
+// "https://host/path" → "host"。ポート付きや不正な URL は 0。
+static int url_host(const char *url, char *out, size_t cap) {
+    const char *p = strstr(url, "://");
+    const char *e;
+    size_t      n;
+
+    p = p ? p + 3 : url;
+    e = strchr(p, '/');
+    n = e ? (size_t)(e - p) : strlen(p);
+
+    if (n == 0 || n >= cap) return 0;
+    memcpy(out, p, n);
+    out[n] = '\0';
+    return 1;
+}
+
+// 失敗したときだけ呼ぶ。DNS が引けるかと、mbedTLS が何を言っているか。
+static void log_why(WiFiClientSecure &sec) {
+    char host[80];
+    char err[80];
+    int  e;
+
+    // DNS。ここで落ちていれば TLS 以前の問題（名前が引けていない）。
+    if (url_host(s_endpoint, host, sizeof(host))) {
+        IPAddress ip;
+        if (WiFi.hostByName(host, ip)) {
+            opur_log_add("DNS %s", ip.toString().c_str());
+
+            // 暗号化なしの素の TCP で 443 を叩いてみる。
+            // ssl_client が返す -1 は「ソケットの失敗」までしか言わないので、
+            // 経路の問題（届かない）と TLS の問題（届くが握れない）を
+            // ここで分ける。繋がったらすぐ切る。
+            {
+                WiFiClient plain;
+                uint32_t   t0 = millis();
+                int        ok;
+
+                plain.setTimeout(5000);
+                ok = plain.connect(ip, 443);
+                opur_log_add("TCP443 %s %ums", ok ? "OK" : "NG",
+                             (unsigned)(millis() - t0));
+                plain.stop();
+            }
+        } else {
+            opur_log_add("DNS 失敗 %s", host);
+        }
+    }
+
+    // mbedTLS の直近のエラー。0 なら TLS まで到達していない。
+    err[0] = '\0';
+    e = sec.lastError(err, sizeof(err));
+    opur_log_add("TLS %d %s", e, err);
+
+    log_heap("失敗時");
+}
 
 // ---------------------------------------------------------------------------
 
@@ -117,11 +197,15 @@ static int semaphore_is_free(WiFiClientSecure &sec) {
     int   code;
     int   free_slot;
 
-    if (!http.begin(sec, s_endpoint)) return -1;
+    if (!http.begin(sec, s_endpoint)) {
+        opur_log_add("送信 begin 失敗");     // URL の形が壊れている
+        return -1;
+    }
 
     code = http.GET();
     if (code != HTTP_CODE_OK) {
         opur_log_add("送信 GET %d", code);
+        log_why(sec);
         http.end();
         return -1;
     }
@@ -141,7 +225,10 @@ static int put_body(WiFiClientSecure &sec, int len) {
     HTTPClient http;
     int code;
 
-    if (!http.begin(sec, s_endpoint)) return -1;
+    if (!http.begin(sec, s_endpoint)) {
+        opur_log_add("送信 begin 失敗(PUT)");
+        return -1;
+    }
 
     http.addHeader("Content-Type", "text/plain; charset=utf-8");
     code = http.PUT((uint8_t *)s_body, (size_t)len);
@@ -149,6 +236,7 @@ static int put_body(WiFiClientSecure &sec, int len) {
 
     if (code != HTTP_CODE_OK) {
         opur_log_add("送信 PUT %d", code);
+        log_why(sec);
         return -1;
     }
     return 1;
@@ -182,9 +270,15 @@ int opur_net_try_send(void) {
         return 0;
     }
 
+    // ここから TLS。mbedTLS は入出力バッファ 16KB x 2 を含めて 45〜50KB 要る。
+    // この機体（ESP32-S3FN8）は PSRAM が無いので逃がす先も無く、描画用 Canvas を
+    // 1bpp にして 28KB 空けることで枠を作ってある（m5curses.cpp の canvas_alloc）。
     {
         WiFiClientSecure sec;
         sec.setInsecure();               // 証明書検証はしない（冒頭の注記）
+
+        // TLS を張る直前の残り。失敗したときにこれと比べる。
+        log_heap("送信前");
 
         free_slot = semaphore_is_free(sec);
         if (free_slot < 0)  return -1;
