@@ -48,6 +48,12 @@
 // "OPUR_0016.txt" で 13 文字。9999 を超えて 5 桁になっても収まる。
 static char s_current_file[16];
 
+// いま本文にあるのはメモではなく /config.txt。保存すると設定として書き戻す。
+//
+// **保存・新規・読込のどれでも抜ける。** 設定を開いたままメモを書き続けて
+// うっかり config.txt を潰す、という事故が起きないようにするため。
+static bool s_config_mode = false;
+
 // ロードのファイル一覧。64 件あれば十分（256 バイト）。
 #define LOAD_MAX_FILES 64
 
@@ -285,14 +291,19 @@ static int save_to_sd(void) {
     if (g_ed.len <= 0) return 0;            // 空ファイルは作らない
     if (!m5c_sd_ready()) return -1;
 
-    // /opur/ がまだ無いこともある。mkdir は既にあれば失敗するだけなので放置。
-    mkdir(OPUR_DIR, 0777);
+    if (s_config_mode) {
+        // 設定は採番も /opur/ も関係ない。決まった 1 箇所に書き戻す。
+        snprintf(path, sizeof(path), "%s", CONFIG_PATH);
+    } else {
+        // /opur/ がまだ無いこともある。mkdir は既にあれば失敗するだけなので放置。
+        mkdir(OPUR_DIR, 0777);
 
-    if (s_current_file[0] == '\0') {
-        const int n = scan_max_index(OPUR_DIR) + 1;
-        snprintf(s_current_file, sizeof(s_current_file), "OPUR_%04d.txt", n);
+        if (s_current_file[0] == '\0') {
+            const int n = scan_max_index(OPUR_DIR) + 1;
+            snprintf(s_current_file, sizeof(s_current_file), "OPUR_%04d.txt", n);
+        }
+        snprintf(path, sizeof(path), "%s/%s", OPUR_DIR, s_current_file);
     }
-    snprintf(path, sizeof(path), "%s/%s", OPUR_DIR, s_current_file);
 
     bytes = (size_t)utf16_to_utf8(g_ed.buf, g_ed.len, u8, sizeof(u8));
 
@@ -305,19 +316,17 @@ static int save_to_sd(void) {
 }
 
 // SD のファイルを本文に読み込む。成功したら 1、失敗したら -1。
+// path は SD 上のフルパス（メモも /config.txt も同じ経路で読む）。
 //
 // SD 上は UTF-8、エディタバッファは UTF-16。変換は utf8_to_utf16() が
 // 既にあるのでそれを使う（本文への挿入 insert_utf8 と同じ経路）。
-static int load_from_sd(const char *fname) {
+static int load_from_sd(const char *path) {
     static char u8[OPUR_BUF_MAX * 3 + 1];
-    char   path[80];
     FILE  *fp;
     size_t nread;
     int    n;
 
     if (!m5c_sd_ready()) return -1;
-
-    snprintf(path, sizeof(path), "%s/%s", OPUR_DIR, fname);
 
     fp = fopen(path, "rb");
     if (!fp) return -1;
@@ -348,6 +357,7 @@ static void start_new(void) {
     cand_bar_clear(&g_bar);
     g_dirty = false;
     s_current_file[0] = '\0';
+    s_config_mode     = false;   // 設定を開いていたなら、ここで抜ける
 }
 
 // 選択肢を出してキーを待ち、押されたキーを返す。
@@ -639,6 +649,7 @@ static void do_load(void) {
     static int      nums[LOAD_MAX_FILES];
 
     char fname[16];
+    char fpath[80];
     int  saved_len, saved_cursor;
     int  count, sel = 0;
 
@@ -660,9 +671,10 @@ static void do_load(void) {
         int  ch;
 
         snprintf(fname, sizeof(fname), "OPUR_%04d.txt", nums[sel]);
+        snprintf(fpath, sizeof(fpath), "%s/%s", OPUR_DIR, fname);
 
         // 読めないファイルも一覧には出す。中身を空にして選択は続けられる。
-        if (load_from_sd(fname) < 0) opur_init(&g_ed);
+        if (load_from_sd(fpath) < 0) opur_init(&g_ed);
 
         // 本文は view に描かせ、下 2 行だけ上書きする。
         // ここだけのためにビューへ新しいモードを足すほどではない。
@@ -694,7 +706,8 @@ static void do_load(void) {
             cand_bar_clear(&g_bar);
 
             // 読み込んだ直後は SD の中身と一致している。
-            g_dirty = false;
+            g_dirty      = false;
+            s_config_mode = false;      // 設定を開いていたなら、ここで抜ける
             return;
         }
 
@@ -749,6 +762,37 @@ static void do_send(void) {
     }
 }
 
+// 設定（/config.txt）を本文に読み込む。メニューの隠し '0'。
+//
+// **PC が手元に無いところで WiFi を切り替えるための逃げ道。**
+// opur_config.c はキーの先頭が '#' の行を読み飛ばすので、
+//
+//   WIFI_SSID=home
+//   #WIFI_SSID=tether
+//
+// と両方書いておけば、'#' を 1 文字動かすだけで切り替わる。
+// 同じキーが 2 回生きていたら**後に読んだほう**が勝つ。
+//
+// 値を打ち直さずに済むのが肝。FEP は 32 文字までしか持てないので、
+// 83 文字の ENDPOINT_URL などは実機では入力し切れない。
+static void do_config(void) {
+    if (!confirm_discard("設定をやめます")) return;
+
+    s_current_file[0] = '\0';
+    s_config_mode     = true;
+
+    if (load_from_sd(CONFIG_PATH) < 0) {
+        // 無ければ空から作らせる。SD が無いときもここに来るが、
+        // そのときは保存で「保存できません」に落ちるので実害は無い。
+        opur_init(&g_ed);
+        notice("config.txt がありません", "新しく作ります");
+    }
+
+    g_fep.ClearMode();
+    cand_bar_clear(&g_bar);
+    g_dirty = false;
+}
+
 // 保存して結果を知らせる。save_to_sd() の戻り値をそのまま返す。
 // メニューの '1' と Fn+S の両方から呼ぶので、モードには触らない
 // （メニューを閉じるかどうかは呼び出し側の都合）。
@@ -765,8 +809,9 @@ static int do_save(void) {
     // s_current_file が空のとき（＝まだ 1 度も保存していない）は素通しする。
     // 起動直後は本文も空なので、下の save_to_sd() が 0 を返して
     // 「本文が空です」になる。
-    if (!g_dirty && s_current_file[0] != '\0') {
-        notice("変更ありません", s_current_file);
+    if (!g_dirty && (s_config_mode || s_current_file[0] != '\0')) {
+        notice("変更ありません", s_config_mode ? "config.txt" : s_current_file);
+        if (s_config_mode) start_new();     // 開きっぱなしにしない
         return 1;
     }
 
@@ -775,14 +820,23 @@ static int do_save(void) {
     switch (r) {
     case 1:
         g_dirty = false;
-        notice("保存しました", s_current_file);
+        if (s_config_mode) {
+            // 設定は起動時にしか読まない。張り直しはせず、そう伝えるだけ。
+            notice("config.txt を保存", "電源を入れ直すと有効");
+            start_new();                    // 設定モードから抜ける
+        } else {
+            notice("保存しました", s_current_file);
+        }
         break;
     case 0:
         // 空ファイルは作らない
         notice("本文が空です", "保存しませんでした");
         break;
     default:
-        notice("保存できません", m5c_sd_ready() ? OPUR_DIR : "SD が読めません");
+        notice("保存できません",
+               !m5c_sd_ready()  ? "SD が読めません"
+               : s_config_mode  ? CONFIG_PATH
+                                : OPUR_DIR);
         break;
     }
     return r;
@@ -812,6 +866,12 @@ static void menu_key(int ch) {
     case '4':
         g_mode = MODE_INPUT;
         do_send();
+        break;
+
+    case '0':
+        // 隠し。メニューには出していない（常用の導線ではないため）。
+        g_mode = MODE_INPUT;
+        do_config();
         break;
 
     case '5':
