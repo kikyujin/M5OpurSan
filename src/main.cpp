@@ -381,6 +381,31 @@ static void notice(const char *l1, const char *l2) {
     timeout(IDLE_REDRAW_MS);
 }
 
+// 本文を捨てる操作（読込・新規）の前に、書きかけの始末をつける。
+// 続けてよければ 1、やめるなら 0。
+//
+// **読込と新規で同じ問い方をする。** 片方だけ黙って捨てると、
+// 「メニューから抜けたつもりが消えていた」が起きる。
+static int confirm_discard(const char *giveup_msg) {
+    int ch;
+
+    if (!g_dirty) return 1;
+
+    ch = ask("保存しますか?", "1:はい 2:いいえ ESC:中止");
+
+    if (ch == '1') {
+        if (save_to_sd() < 0) {
+            notice("保存できません", giveup_msg);
+            return 0;
+        }
+        g_dirty = false;
+        return 1;
+    }
+
+    // '2' だけが「捨ててよい」。ESC も誤爆も、捨てない側に倒す。
+    return (ch == '2') ? 1 : 0;
+}
+
 // 辞書が開けなかったときに理由を出す。文字種変換だけなら辞書なしでも動くので、
 // 止めずにそのまま続ける。
 static void warn_no_dict(void) {
@@ -618,19 +643,7 @@ static void do_load(void) {
     int  count, sel = 0;
 
     // 書きかけがあるなら先に始末をつける。黙って捨てない。
-    if (g_dirty) {
-        const int ch = ask("保存しますか?", "1:はい 2:いいえ ESC:中止");
-
-        if (ch == '1') {
-            if (save_to_sd() < 0) {
-                notice("保存できません", "読込をやめます");
-                return;
-            }
-            g_dirty = false;
-        } else if (ch != '2') {
-            return;             // ESC や誤爆。書きかけを捨てないよう中止する
-        }
-    }
+    if (!confirm_discard("読込をやめます")) return;
 
     count = scan_file_list(nums, LOAD_MAX_FILES);
     if (count == 0) {
@@ -743,7 +756,21 @@ static void do_send(void) {
 // 保存しても本文は残す。開いているファイルを編集し続けられないと
 // 「上書き保存」に意味が無い。新規に戻したいときはメニューの '2'。
 static int do_save(void) {
-    const int r = save_to_sd();
+    int r;
+
+    // 変更が無く、既に開いているファイルがあるなら書かない。
+    // 中身が同じものを書き直しても得るものが無いし、何も変えていないのに
+    // 「保存しました」と出るのは嘘に近い。
+    //
+    // s_current_file が空のとき（＝まだ 1 度も保存していない）は素通しする。
+    // 起動直後は本文も空なので、下の save_to_sd() が 0 を返して
+    // 「本文が空です」になる。
+    if (!g_dirty && s_current_file[0] != '\0') {
+        notice("変更ありません", s_current_file);
+        return 1;
+    }
+
+    r = save_to_sd();
 
     switch (r) {
     case 1:
@@ -770,6 +797,9 @@ static void menu_key(int ch) {
         break;
 
     case '2':
+        // 読込と同じく、書きかけがあるなら聞く。
+        // 中止ならメニューに留まる（やり直せることを伝えるため）。
+        if (!confirm_discard("新規をやめます")) break;
         start_new();
         g_mode = MODE_INPUT;
         break;
@@ -867,10 +897,16 @@ static void handle_key(int ch) {
     }
 
     // --- Fn+S: 保存のショートカット ---
-    // ESC → 1 と同じ。入力中だけ効かせる。変換中（MODE_SELECT）に割り込むと
-    // 未確定の読みをどう扱うかを決めなければならず、旨みに合わない。
+    // ESC → 1 と同じ。ただし**変換の途中では効かせない**。
+    //
+    // 未確定のローマ字（FEP バッファ）や候補選択中の読みは本文に入っていない
+    // ので、そのまま保存すると画面に見えているものと SD の中身がずれる。
+    //
+    // メニュー経由でも同じことは起きない。FEP バッファが空でないときの ESC は
+    // FEP が食って変換を取り消すので、そもそもメニューに入れないため
+    // （FEP_THRU の VK_ESC の注記を参照）。ここもそれに揃える。
     if (ch == KEY_SAVE) {
-        if (g_mode == MODE_INPUT) do_save();
+        if (g_mode == MODE_INPUT && g_fep.GetBuffLen() <= 0) do_save();
         return;
     }
 
