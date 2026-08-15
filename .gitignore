@@ -15,9 +15,10 @@ opur_editor/test_editor
 opur_editor/test_candidate_bar
 opur_editor/test_dict
 
-# dict: 辞書素材の clone と生成物（どちらも make で再生成できる）
+# dict: 辞書素材の clone と生成物
+# system.dic は同梱するので追跡する（make build-dict で再生成もできる）
 dict/natume/
-dict/output/
+dict/output/stats.txt
 
 # 公開しないもの
 # .claude/          ローカルの権限設定。絶対パス等の環境情報が残る

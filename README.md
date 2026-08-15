@@ -21,7 +21,7 @@ WiFi 不要。サーバー不要。辞書もかな漢字変換エンジンも、
 
 | | |
 |--|--|
-| M5Stack Cardputer ADV | ESP32-S3, 1.14" LCD, 56キーキーボード |
+| M5Stack Cardputer | ESP32-S3, 1.14" LCD, 56キーキーボード。ADV で開発・検証。無印 / v1.1 でも動く可能性あり |
 | microSD カード | 32GB 以下（FAT32）。辞書に約 14MB |
 | USB-C ケーブル | ファームウェア書き込み用 |
 
@@ -33,8 +33,8 @@ Mac や Linux のターミナル上で curses アプリとして動く。実機�
 
 ```bash
 cd opur_editor
-make pc
-./opur_pc
+make
+./opur_editor
 ```
 
 ### M5 ビルド（PlatformIO）
@@ -65,7 +65,7 @@ PlatformIO が ESP32-S3 向けにビルドし、USB 経由で書き込む。
 |--|--|
 | 文字キー | ローマ字入力 → かな変換 |
 | Space | 漢字変換（候補表示） |
-| ← → | 候補選択 / 変換範囲の伸縮 |
+| ← → | 候補選択 |
 | Enter | 確定 |
 | ESC | メニュー / 変換キャンセル |
 | BS | 削除 |
@@ -130,7 +130,7 @@ WiFi はオプション。オフラインでも日本語入力・編集・保存
 
 ```bash
 cd dict
-python3 build_dict.py
+make build-dict
 ```
 
 ユーザー辞書（`user.dic`）は将来実装予定。現時点ではシステム辞書のみ対応。

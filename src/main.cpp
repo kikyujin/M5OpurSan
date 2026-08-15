@@ -51,6 +51,14 @@ static char s_current_file[16];
 // ロードのファイル一覧。64 件あれば十分（256 バイト）。
 #define LOAD_MAX_FILES 64
 
+// 入力待ちの上限（ms）。過ぎたら getch() が ERR を返し、loop() が
+// 何もせず描き直す。**それだけのために置いてある**——右下の時計は
+// view_draw() の中で描かれるので、描き直さないと止まって見える。
+//
+// 021 で NVS 退避をやめたとき待ち切る（-1）ようにしたら、キーを打たない間
+// 時計が固まった。HH:MM 表示なので、分の変わり目は最大これだけ遅れる。
+#define IDLE_REDRAW_MS 30000
+
 // CandBar は約 84KB。スタックにも loop() のローカルにも置けないので、
 // 起動時に 1 度だけ確保される静的領域に置く。
 // （malloc でも同じだが、静的にしておくと pio run のサイズ表に出るので
@@ -352,7 +360,11 @@ static int ask(const char *l1, const char *l2) {
     if (l2) mvaddstr(3, 0, l2);
     refresh();
 
+    // ここは待ち切る。時間切れで ERR を返すと「いいえ」と区別が付かず、
+    // 席を外しただけで書きかけを捨てる判断になってしまう。
+    timeout(-1);
     ch = getch();
+    timeout(IDLE_REDRAW_MS);
     return ch;
 }
 
@@ -364,7 +376,9 @@ static void notice(const char *l1, const char *l2) {
     mvaddstr(5, 0, "キーを押すと戻ります");
     refresh();
 
+    timeout(-1);            // 読むまで消さない
     getch();
+    timeout(IDLE_REDRAW_MS);
 }
 
 // 辞書が開けなかったときに理由を出す。文字種変換だけなら辞書なしでも動くので、
@@ -410,10 +424,9 @@ static void flash_status(const char *l1, const char *l2, int ms) {
     refresh();
 
     // キーを押せばすぐ飛ばせる（getch は溜まっていれば待たずに返る）。
-    // ここだけが待ち時間を触るので、出るときに既定（待ち切る）へ戻す。
     timeout(ms);
     getch();
-    timeout(-1);
+    timeout(IDLE_REDRAW_MS);
 }
 
 static void boot_wifi(void) {
@@ -650,7 +663,11 @@ static void do_load(void) {
         m5c_separator();
         refresh();
 
+        // 選んでいる間は待ち切る。時間切れで戻ってきても、この周回は
+        // プレビューを SD から読み直すだけで何も進まない。
+        timeout(-1);
         ch = getch();
+        timeout(IDLE_REDRAW_MS);
 
         if (ch == KEY_LEFT)  { sel = (sel + count - 1) % count; continue; }
         if (ch == KEY_RIGHT) { sel = (sel + 1) % count;         continue; }
@@ -832,8 +849,7 @@ void setup() {
     // 起動は常に空バッファから。前回の書きかけは復元しない（021）。
     g_dirty = false;
 
-    // 定期的に起きる理由が無くなったので、キーが来るまで待ち切る。
-    timeout(-1);
+    timeout(IDLE_REDRAW_MS);
     crumb(CRUMB_SETUP_END);
 }
 
@@ -951,8 +967,8 @@ void loop() {
     crumb(CRUMB_GETCH);
     int ch = getch();
 
-    // timeout(-1) なので普段は来ないが、flash_status() の待ちが明けた直後など
-    // ERR が返ることはある。描き直して待ち直すだけ。
+    // 無操作のまま IDLE_REDRAW_MS 過ぎた。何もせず戻る——次の周回の
+    // view_draw() で時計が描き直される。
     if (ch == ERR) return;
 
     // 本文が実際に増減したときだけ dirty にする。
