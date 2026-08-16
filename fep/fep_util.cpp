@@ -46,3 +46,11 @@ BOOL ISCAPITAL(UTF16 ch) {
 BOOL IS_ROMATOP(UTF16 ch) {
   return (ch >= 'a' && ch <= 'z') ? TRUE : FALSE;
 }
+
+// 全角かなか（ひらがな U+3040-309F / カタカナ U+30A0-30FF）。
+// 長音記号 U+30FC もカタカナ側に入るので、「ラー」のあとにもう一度 '-' を
+// 打てば「ラーー」になる。半角カタカナは対象外——このプロジェクトでは
+// そもそも使わない（実描画幅が読めず桁勘定が狂うため）。
+BOOL IS_FULLWIDTH_KANA(UTF16 ch) {
+  return (ch >= 0x3040 && ch <= 0x30FF) ? TRUE : FALSE;
+}

@@ -380,6 +380,20 @@ static int RunSelfTest() {
   { Harness h; h.SendStr("ky");        h.Pending(buf, sizeof(buf)); Check("ky (pending)", buf, "ky"); }
   { Harness h; h.SendStr("n");         h.Pending(buf, sizeof(buf)); Check("n (pending)",  buf, "n"); }
 
+  printf("\n=== かなのあとのハイフン → 長音 ===\n");
+  // Cardputer には 'ー' キーが無いので、'-' を打ち替える。
+  { Harness h; h.SendStr("ra-menn");  h.Pending(buf, sizeof(buf)); Check("ra-menn",  buf, "らーめん"); }
+  { Harness h; h.SendStr("ko-hi-");   h.Pending(buf, sizeof(buf)); Check("ko-hi- (連続)", buf, "こーひー"); }
+  // 直前が全角かなでなければ、従来どおり半角のまま。
+  // 'a' は「あ」になるが 'b' は未確定のまま残る。その 'b' のあとなので半角。
+  { Harness h; h.SendStr("ab-cd");    h.Pending(buf, sizeof(buf)); Check("英字のあと", buf, "あb-cd"); }
+  { Harness h; h.SendStr("-a");       h.Pending(buf, sizeof(buf)); Check("先頭",         buf, "-あ"); }
+  { Harness h; h.SendStr("1-2");      h.Pending(buf, sizeof(buf)); Check("数字のあと",   buf, "1-2"); }
+  // 設定行を実機で打つ用途を壊していないこと（先頭大文字で変換バイパス）。
+  { Harness h; h.SendStr("WIFI-A");   h.Pending(buf, sizeof(buf)); Check("WIFI-A",       buf, "WIFI-A"); }
+  // ローマ字の途中（未確定の 'k'）は全角かなではないので半角のまま。
+  { Harness h; h.SendStr("ak-");      h.Pending(buf, sizeof(buf)); Check("ローマ字途中のあと", buf, "あk-"); }
+
   printf("\n=== 逆変換（かな→ローマ字）===\n");
   { Harness h; h.SendStr("kyakka");
     UTF16 tmp[256]; UTF16Array ua(tmp, 256);

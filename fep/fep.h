@@ -67,6 +67,7 @@ BOOL  ISVALIDKEY(VKEY key);
 BOOL  ISNUMBER(VKEY key);
 BOOL  ISCAPITAL(UTF16 ch);
 BOOL  IS_ROMATOP(UTF16 ch);
+BOOL  IS_FULLWIDTH_KANA(UTF16 ch);
 
 // ---- 文字種変換関数（convert.cpp で実装） ----------------------------------
 

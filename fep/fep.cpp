@@ -246,7 +246,26 @@ FEPRET CFep::InputMode(VKEY key, UTF16Array& to_edit) {
     }
 
     // バッファに文字を追加する。
-    uaBuff[nBuffLen++] = CONVERT_UTF16(key);
+    {
+      UTF16 ch = CONVERT_UTF16(key);
+
+      // 全角かなのあとの '-' は長音記号にする。
+      //
+      // Cardputer のキーボードには 'ー' が無く、'-'(U+002D) しか打てない。
+      // このままだと「ラーメン」が「ラ-メン」になる。
+      //
+      // 判定は「直前が全角かなか」だけでよい。英数を打っているときは直前が
+      // ASCII なので当たらず、'-' はそのまま入る（設定行の
+      // WIFI_SSID=... や URL を実機で打つ場合もこれで壊れない）。
+      //
+      // ひらがな入力中でも U+30FC（カタカナ長音）で統一する。字形は同じで、
+      // ひらがな用の長音記号は Unicode に無い。
+      if (ch == 0x002D && nBuffLen > 0 && IS_FULLWIDTH_KANA(uaBuff[nBuffLen - 1])) {
+        ch = 0x30FC;
+      }
+
+      uaBuff[nBuffLen++] = ch;
+    }
 
     // 自動ローマ字変換
     nBuffLen = ConvertRome(uaBuff, uaBuff, nBuffLen);   // 長さは中で更新される

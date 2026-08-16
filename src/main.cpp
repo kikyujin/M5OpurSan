@@ -740,9 +740,25 @@ static void light_sleep_cycle(void) {
     s_last_key_ms = now_ms();
 }
 
+// 給電中とみなす残量（%）。
+//
+// Cardputer では充電中かどうかを直接取れない（M5Unified の isCharging() は
+// この機種を扱わない）。ただし USB を挿していると電圧が上がって % が
+// 100 に張り付き、抜くと即座に落ちる（実機で 100% → 91%）。
+// **100% は「電源に繋がっている」とみなして差し支えない。**
+#define BATTERY_POWERED_PCT 100
+
 // 無操作が続いていたら寝る。loop() の ERR 枝から毎回呼ばれる。
 static void idle_check(void) {
     if (!opur_sleep_key_wake_supported()) return;   // 起きられないので寝ない
+
+    // 給電中は寝ない。省電力の意味が無いうえ、ディープスリープに落ちると
+    // USB CDC が切れて焼けなくなる（2026-08-16 にそれで実機を半分壊した）。
+    //
+    // m5c_battery_level() は 30 秒キャッシュだが、判定するのは無操作 1 分の
+    // タイムアウト後なので遅れは問題にならない。
+    if (m5c_battery_level() >= BATTERY_POWERED_PCT) return;
+
     if ((now_ms() - s_last_key_ms) < IDLE_LIGHT_MS) return;
 
     light_sleep_cycle();
