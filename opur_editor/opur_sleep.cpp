@@ -64,6 +64,17 @@ int opur_sleep_light(uint32_t timer_ms) {
 
     // ライトスリープの GPIO ウェイクは RTC GPIO でなくても使えるが、
     // レベル指定しかできない（エッジ不可）。INT はアクティブ LOW。
+    //
+    // **この呼び出しはピンの割り込み種別そのものを LOW_LEVEL に書き換える。**
+    // Arduino の attachInterrupt() が gpio_set_intr_type() と
+    // gpio_wakeup_enable() を同じ intr_type で並べて呼んでいる
+    // （cores/esp32/esp32-hal-gpio.c:191-193）のがその証拠。
+    //
+    // M5Cardputer のキーボードドライバは同じ GPIO11 に CHANGE（ANYEDGE）で
+    // ISR を張っているので、**起きたあとに戻さないとキー入力が壊れる**。
+    // レベル割り込みのままだと、INT が LOW の間 ISR が延々と再入する
+    // （TCA8418.cpp の ISR はフラグを立てるだけで、INT を下げるのは
+    //   I2C で FIFO を読む update() のほう）。
     gpio_wakeup_enable(kKeyIntPin, GPIO_INTR_LOW_LEVEL);
     esp_sleep_enable_gpio_wakeup();
 
@@ -79,6 +90,10 @@ int opur_sleep_light(uint32_t timer_ms) {
     // 意図しないソースが生き残る。
     gpio_wakeup_disable(kKeyIntPin);
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+
+    // 割り込み種別をキーボードドライバの張り方（CHANGE）に戻す。
+    // gpio_wakeup_disable() は種別までは戻してくれない。
+    gpio_set_intr_type(kKeyIntPin, GPIO_INTR_ANYEDGE);
 
     return wake;
 }
