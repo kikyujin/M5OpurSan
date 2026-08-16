@@ -79,6 +79,18 @@ int opur_sleep_light(uint32_t timer_ms) {
     // レベル割り込みのままだと、INT が LOW の間 ISR が延々と再入する
     // （TCA8418.cpp の ISR はフラグを立てるだけで、INT を下げるのは
     //   I2C で FIFO を読む update() のほう）。
+    // **CPU への配送を先に止める。** これをやらないと、起きた瞬間に
+    // 「INT が LOW・種別はレベル」という状態で割り込みが有効なままになり、
+    // ANYEDGE に戻すまでのあいだ ISR が再入し続ける。実機で割込 WDT
+    // （300ms）に達してリセットした（2026-08-16）。
+    //
+    // マスクしてもライトスリープからの復帰はできる。GPIO の
+    // ウェイクアップは pin.wakeup_enable が受け持っていて、
+    // CPU への配送を決める int_ena とは別系統だから
+    // （ESP-IDF の light sleep の例は ISR を一切張らずに
+    //   gpio_wakeup_enable() だけで起こしている）。
+    gpio_intr_disable(kKeyIntPin);
+
     gpio_wakeup_enable(kKeyIntPin, GPIO_INTR_LOW_LEVEL);
     esp_sleep_enable_gpio_wakeup();
 
@@ -95,9 +107,16 @@ int opur_sleep_light(uint32_t timer_ms) {
     gpio_wakeup_disable(kKeyIntPin);
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
 
-    // 割り込み種別をキーボードドライバの張り方（CHANGE）に戻す。
+    // 割り込み種別をキーボードドライバの張り方（CHANGE）に戻してから、
+    // 配送を戻す。**この順序でないと意味が無い。**
     // gpio_wakeup_disable() は種別までは戻してくれない。
+    //
+    // 起こしたキーのイベントは取りこぼさない。割り込みステータスのビットは
+    // 立てた側がクリアするまで残るので、寝ているあいだに立ったビットが
+    // gpio_intr_enable() の時点で配送され、TCA8418 のドライバが
+    // フラグを立てて I2C で FIFO を読みにいく。
     gpio_set_intr_type(kKeyIntPin, GPIO_INTR_ANYEDGE);
+    gpio_intr_enable(kKeyIntPin);
 
     return wake;
 }

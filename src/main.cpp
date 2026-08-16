@@ -131,6 +131,10 @@ static inline void crumb(uint32_t v) { crumb2(v, 0, 0); }
 #define CRUMB_SLEEP_ENTER   25
 #define CRUMB_SLEEP_WOKE    26   /* a = 起きた理由（OPUR_WAKE_*） */
 #define CRUMB_SLEEP_DEEP    27
+// 無操作で getch() が ERR を返したあとの処理。これが無いと、21「キー待ち」が
+// getch() 本体と ERR 枝の両方を指してしまい、場所が絞れない
+// （2026-08-16 の割込 WDT がまさにこれで絞れなかった）。
+#define CRUMB_IDLE          28
 
 static const char *crumb_text(uint32_t c) {
     switch (c) {
@@ -145,6 +149,7 @@ static const char *crumb_text(uint32_t c) {
     case CRUMB_SLEEP_ENTER: return "スリープ突入";
     case CRUMB_SLEEP_WOKE:  return "スリープ復帰";
     case CRUMB_SLEEP_DEEP:  return "ディープ突入";
+    case CRUMB_IDLE:        return "無操作処理";
     default:                return "?";
     }
 }
@@ -1298,8 +1303,9 @@ void loop() {
     // 無操作のまま IDLE_REDRAW_MS 過ぎた。次の周回の view_draw() で
     // 時計が描き直される。起動時に間に合わなかった WiFi もここで拾う。
     if (ch == ERR) {
+        crumb(CRUMB_IDLE);
         wifi_catch_up();
-        idle_check();
+        idle_check();          // 中で 25/26/27 を打つ
         return;
     }
 
