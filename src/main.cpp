@@ -149,6 +149,7 @@ static const char *reset_text(int r) {
     case 5:  return "割込WDT";
     case 6:  return "タスクWDT";
     case 7:  return "その他WDT";
+    case 8:  return "ディープスリープ復帰";
     case 9:  return "電圧低下";
     default: return "";
     }
@@ -612,65 +613,6 @@ static void wifi_catch_up(void) {
 }
 
 // ---------------------------------------------------------------------------
-// スリープ
-// ---------------------------------------------------------------------------
-//
-//   [Active] --1分無操作--> [Light Sleep] --10分--> [AUTOSAVE → Deep Sleep]
-//
-// 判定は loop() の「無操作で ERR が返った」枝に置いてある。getch() の中で
-// 寝たほうが反応は良いが、m5curses が電源管理を持つことになる。あそこは
-// PC 版と対になる curses 互換の薄層なので、役割を増やしたくない。
-//
-// **ライトスリープにタイマーを付けている。** 指示 2-1 には「タイマー不要」と
-// あるが、キーでしか起きないと 2-2 の「10 分で Deep Sleep」に永久に届かない。
-// キー以外で起きる理由が無い以上、10 分ぶんの累積カウントは
-// 「10 分のタイマーを 1 本張る」のと同じことになる。
-//
-// キーウェイクが使えない機体（無印 / v1.1）では**一切寝ない**。
-// 理由は opur_sleep.h の注記を参照。
-
-#define IDLE_LIGHT_MS   60000UL   // 無操作 1 分でライトスリープ
-#define LIGHT_TOTAL_MS 600000UL   // ライトスリープ 10 分でディープへ
-
-// 最後にキーが来た時刻（ms）。
-//
-// millis() ではなく esp_timer_get_time() を使うのは、このファイルに Arduino の
-// ヘッダを持ち込まないため（flash_status が delay() を避けているのと同じ理由）。
-static uint32_t s_last_key_ms = 0;
-
-static uint32_t now_ms(void) {
-    return (uint32_t)(esp_timer_get_time() / 1000);
-}
-
-// 画面と WiFi を落としてライトスリープに入り、起きたら戻す。
-//
-// バッファは RAM 上にそのまま残る（ライトスリープは RAM を保持する）ので、
-// 復帰後は loop() の次の view_draw() が続きを描くだけでいい。
-//
-// WiFi は落とす。このビルドには CONFIG_PM_ENABLE が入っておらず自動ライト
-// スリープが使えないため、手で寝ている間は WiFi のタスクも止まってビーコンを
-// 取りこぼす。繋いだままにすると AP から切られる。再接続は実測 100ms。
-static void light_sleep_cycle(void) {
-    const bool had_wifi = opur_wifi_is_connected() != 0;
-
-    m5c_display_off();
-    if (had_wifi) opur_wifi_disconnect();
-
-    opur_sleep_light(0);          // キーでしか起きない
-
-    // 先に画面を点ける。Canvas は触っていないので直前の絵がそのまま出る。
-    // WiFi の再接続は最大 3 秒ブロックするので、そのあとに回す。
-    m5c_display_on();
-    if (had_wifi) opur_wifi_connect(&g_cfg);
-
-    // 電力実験の材料。1 周につき 1 行だけ残す（ログは 32 行のリング）。
-    opur_log_add("起床 電池%d%% %dmV",
-                 m5c_battery_level(), m5c_battery_mv());
-
-    s_last_key_ms = now_ms();
-}
-
-// ---------------------------------------------------------------------------
 // AUTOSAVE
 // ---------------------------------------------------------------------------
 //
@@ -709,6 +651,77 @@ static void autosave_restore(void) {
     // （次の保存で新しい番号が採られる）。
     g_dirty = true;
 }
+
+// ---------------------------------------------------------------------------
+// スリープ
+// ---------------------------------------------------------------------------
+//
+//   [Active] --1分無操作--> [Light Sleep] --10分--> [AUTOSAVE → Deep Sleep]
+//
+// 判定は loop() の「無操作で ERR が返った」枝に置いてある。getch() の中で
+// 寝たほうが反応は良いが、m5curses が電源管理を持つことになる。あそこは
+// PC 版と対になる curses 互換の薄層なので、役割を増やしたくない。
+//
+// **ライトスリープにタイマーを付けている。** 指示 2-1 には「タイマー不要」と
+// あるが、キーでしか起きないと 2-2 の「10 分で Deep Sleep」に永久に届かない。
+// キー以外で起きる理由が無い以上、10 分ぶんの累積カウントは
+// 「10 分のタイマーを 1 本張る」のと同じことになる。
+//
+// キーウェイクが使えない機体（無印 / v1.1）では**一切寝ない**。
+// 理由は opur_sleep.h の注記を参照。
+
+#define IDLE_LIGHT_MS   60000UL   // 無操作 1 分でライトスリープ
+#define LIGHT_TOTAL_MS 600000UL   // ライトスリープ 10 分でディープへ
+#define DEEP_TIMER_MS  120000UL   // ディープからの復帰タイマー 2 分
+
+// 最後にキーが来た時刻（ms）。
+//
+// millis() ではなく esp_timer_get_time() を使うのは、このファイルに Arduino の
+// ヘッダを持ち込まないため（flash_status が delay() を避けているのと同じ理由）。
+static uint32_t s_last_key_ms = 0;
+
+static uint32_t now_ms(void) {
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+// 画面と WiFi を落としてライトスリープに入り、起きたら戻す。
+//
+// バッファは RAM 上にそのまま残る（ライトスリープは RAM を保持する）ので、
+// 復帰後は loop() の次の view_draw() が続きを描くだけでいい。
+//
+// WiFi は落とす。このビルドには CONFIG_PM_ENABLE が入っておらず自動ライト
+// スリープが使えないため、手で寝ている間は WiFi のタスクも止まってビーコンを
+// 取りこぼす。繋いだままにすると AP から切られる。再接続は実測 100ms。
+static void light_sleep_cycle(void) {
+    const bool had_wifi = opur_wifi_is_connected() != 0;
+
+    m5c_display_off();
+    if (had_wifi) opur_wifi_disconnect();
+
+    // キーが来れば戻ってくる。10 分来なければタイマーで起きて次の段へ。
+    const int wake = opur_sleep_light(LIGHT_TOTAL_MS);
+
+    if (wake == OPUR_WAKE_TIMER) {
+        // 画面も WiFi も落ちたまま、そのままディープへ落ちる。**戻らない。**
+        // ここで点け直すと、誰も見ていない画面を数百 ms 光らせるだけになる。
+        autosave_write();
+        opur_log_add("deep sleep へ 電池%d%% %dmV",
+                     m5c_battery_level(), m5c_battery_mv());
+        opur_sleep_deep(DEEP_TIMER_MS);
+    }
+
+    // 先に画面を点ける。Canvas は触っていないので直前の絵がそのまま出る。
+    // WiFi の再接続は最大 3 秒ブロックするので、そのあとに回す。
+    m5c_display_on();
+    if (had_wifi) opur_wifi_connect(&g_cfg);
+
+    // 電力実験の材料。1 周につき 1 行だけ残す（ログは 32 行のリング）。
+    opur_log_add("起床 電池%d%% %dmV",
+                 m5c_battery_level(), m5c_battery_mv());
+
+    s_last_key_ms = now_ms();
+}
+
 
 // 無操作が続いていたら寝る。loop() の ERR 枝から毎回呼ばれる。
 static void idle_check(void) {
@@ -1079,8 +1092,12 @@ void setup() {
     opur_log_clear();
 
     // 前回が異常終了なら、どこまで進んでいたかを最初に出す。
-    // 正常な電源投入・ソフトリセットのときは黙っている。
-    if (reset_reason != 1 && reset_reason != 3) {
+    // 黙っているのは 1 電源投入 / 3 ソフトリセット / 8 ディープスリープ復帰。
+    //
+    // **8 を外さないと、寝て起きるたびに誤爆する。** 意図した復帰なのに
+    // 「落ちた場所」が出てしまい、しかも reset_text() に枝が無かった頃は
+    // 「前回 」と空欄になって、何が起きたのか分からないログになっていた。
+    if (reset_reason != 1 && reset_reason != 3 && reset_reason != 8) {
         opur_log_add("前回 %s", reset_text(reset_reason));
         opur_log_add("落ちた場所 %u %s", prev_crumb, crumb_text(prev_crumb));
         opur_log_add("  a=%ld b=%ld", (long)prev_a, (long)prev_b);
