@@ -46,6 +46,13 @@
 #define OPUR_DIR      M5C_SD_MOUNT "/opur"
 #define CONFIG_PATH   M5C_SD_MOUNT "/config.txt"
 
+// ディープスリープに落ちる直前の書きかけ。中身は保存したメモと同じ UTF-8 の
+// 生テキストで、ヘッダは持たない（ファイル名だけが判別子）。
+//
+// 起動時にあれば読んで消す。**フラグは持たない**——ファイルの有無がそのまま
+// 状態なので、二重に読む心配も、NVS の書き込み（021 のパニック源）も要らない。
+#define AUTOSAVE_PATH M5C_SD_MOUNT "/AUTOSAVE.txt"
+
 // 開いている（= 次の保存で上書きする）ファイル名。空なら新規。
 // "OPUR_0016.txt" で 13 文字。9999 を超えて 5 桁になっても収まる。
 static char s_current_file[16];
@@ -284,11 +291,27 @@ static int scan_max_index(const char *dir) {
 //
 // 成功したら 1、失敗したら -1、本文が空なら 0。
 // 保存したファイル名は s_current_file に入る（続けて保存すれば上書きになる）。
-static int save_to_sd(void) {
+// 本文を指定パスへ UTF-8 で書く。成功したら 1、失敗したら -1。
+//
+// パスの決め方（採番・/opur/・config.txt）は呼び出し側の関心事なので分けてある。
+// AUTOSAVE も同じ形式で書きたいだけなので、ここだけを共有する。
+static int write_text_to(const char *path) {
     static char u8[OPUR_BUF_MAX * 3 + 1];   // UTF-16 1 文字は UTF-8 で最大 3 バイト
-    char path[80];
     FILE *fp;
     size_t bytes, written;
+
+    bytes = (size_t)utf16_to_utf8(g_ed.buf, g_ed.len, u8, sizeof(u8));
+
+    fp = fopen(path, "wb");
+    if (!fp) return -1;
+    written = fwrite(u8, 1, bytes, fp);
+    fclose(fp);
+
+    return (written == bytes) ? 1 : -1;
+}
+
+static int save_to_sd(void) {
+    char path[80];
 
     if (g_ed.len <= 0) return 0;            // 空ファイルは作らない
     if (!m5c_sd_ready()) return -1;
@@ -307,14 +330,7 @@ static int save_to_sd(void) {
         snprintf(path, sizeof(path), "%s/%s", OPUR_DIR, s_current_file);
     }
 
-    bytes = (size_t)utf16_to_utf8(g_ed.buf, g_ed.len, u8, sizeof(u8));
-
-    fp = fopen(path, "wb");
-    if (!fp) return -1;
-    written = fwrite(u8, 1, bytes, fp);
-    fclose(fp);
-
-    return (written == bytes) ? 1 : -1;
+    return write_text_to(path);
 }
 
 // SD のファイルを本文に読み込む。成功したら 1、失敗したら -1。
@@ -652,6 +668,46 @@ static void light_sleep_cycle(void) {
                  m5c_battery_level(), m5c_battery_mv());
 
     s_last_key_ms = now_ms();
+}
+
+// ---------------------------------------------------------------------------
+// AUTOSAVE
+// ---------------------------------------------------------------------------
+//
+// ディープスリープは RAM を捨てるので、その前に本文を SD へ逃がす。
+// 手動保存（ESC→1 の OPUR_%04d.txt）とは完全に独立していて、
+// 番号も s_current_file も動かさない。
+
+// 本文を AUTOSAVE.txt へ書く。空なら何もしない（空ファイルを作らない）。
+static void autosave_write(void) {
+    if (g_ed.len <= 0)   return;
+    if (!m5c_sd_ready()) return;
+
+    if (write_text_to(AUTOSAVE_PATH) == 1) opur_log_add("AUTOSAVE %d字", g_ed.len);
+    else                                   opur_log_add("AUTOSAVE 書けません");
+}
+
+// 起動時。AUTOSAVE.txt があれば本文に戻して消す。
+//
+// **読めたときだけ消す。** 読めないファイルを消すと書きかけが完全に消える。
+// 残しておけば次の起動でもう一度試せるし、ログに理由が残る。
+static void autosave_restore(void) {
+    struct stat st;
+
+    if (!m5c_sd_ready())                  return;
+    if (stat(AUTOSAVE_PATH, &st) != 0)    return;   // 無い = 通常の白紙起動
+
+    if (load_from_sd(AUTOSAVE_PATH) != 1) {
+        opur_log_add("AUTOSAVE 読めません");
+        return;
+    }
+
+    remove(AUTOSAVE_PATH);
+    opur_log_add("AUTOSAVE 復元 %d字", g_ed.len);
+
+    // 手動保存はされていないので未保存扱い。ファイル名も持たせない
+    // （次の保存で新しい番号が採られる）。
+    g_dirty = true;
 }
 
 // 無操作が続いていたら寝る。loop() の ERR 枝から毎回呼ばれる。
@@ -1060,8 +1116,12 @@ void setup() {
     boot_wifi();
     crumb(CRUMB_WIFI_DONE);
 
-    // 起動は常に空バッファから。前回の書きかけは復元しない（021）。
+    // 起動は空バッファから。021 で NVS 自動退避をやめて以来、
+    // 電源を切れば書きかけは消える（ワープロと同じ）。
     g_dirty = false;
+
+    // 例外はディープスリープ直前の AUTOSAVE だけ。あれば続きから始める。
+    autosave_restore();
 
     s_last_key_ms = now_ms();
 
