@@ -712,7 +712,10 @@ static void light_sleep_cycle(void) {
     // 電力実験の材料。**1 周につきここ 1 行だけ**にしてある（ログは 32 行の
     // リングなので、入眠と起床で 2 行使うと履歴が半分しか残らない）。
     // 起床は「次の『寝る』が来ていること」で分かるので、別に出さなくていい。
-    opur_log_add("寝る 電池%d%% %dmV", m5c_battery_level(), m5c_battery_mv());
+    // usb= は給電判定の材料。寝たということは 0 のはずで、1 が出ていたら
+    // on_wall_power() の判定が抜けている。
+    opur_log_add("寝る 電池%d%% %dmV usb%d",
+                 m5c_battery_level(), m5c_battery_mv(), m5c_usb_connected());
 
     m5c_display_off();
     if (had_wifi) opur_wifi_disconnect();
@@ -740,24 +743,38 @@ static void light_sleep_cycle(void) {
     s_last_key_ms = now_ms();
 }
 
-// 給電中とみなす残量（%）。
+// 給電されているか。
 //
 // Cardputer では充電中かどうかを直接取れない（M5Unified の isCharging() は
-// この機種を扱わない）。ただし USB を挿していると電圧が上がって % が
-// 100 に張り付き、抜くと即座に落ちる（実機で 100% → 91%）。
-// **100% は「電源に繋がっている」とみなして差し支えない。**
+// この機種を扱わない）ので、目印を 2 つ or で見る。
+//
+//   (1) 残量 100%
+//       **本体スイッチ OFF のときだけ当てになる。** その場合 USB が唯一の
+//       電源なので必ず 100% を指す。スイッチ ON だとバッテリーの実残量が
+//       出るため、充電中でも 100% に届かない（マスターの実機観察）。
+//   (2) USB CDC が繋がっている
+//       PC に挿さっている状態。**焼く可能性がある状態**でもあるので、
+//       ここで寝られると USB CDC が切れて焼けなくなる
+//       （2026-08-16 にそれで実機を半分壊した）。
+//
+// 残る穴は「スイッチ ON ＋ 充電器だけ ＋ 満充電でない」。ホストが居ないので
+// 焼く事故は起きず、寝ても充電は続くので実害は小さい。
 #define BATTERY_POWERED_PCT 100
+
+static bool on_wall_power(void) {
+    return m5c_battery_level() >= BATTERY_POWERED_PCT || m5c_usb_connected();
+}
 
 // 無操作が続いていたら寝る。loop() の ERR 枝から毎回呼ばれる。
 static void idle_check(void) {
     if (!opur_sleep_key_wake_supported()) return;   // 起きられないので寝ない
 
     // 給電中は寝ない。省電力の意味が無いうえ、ディープスリープに落ちると
-    // USB CDC が切れて焼けなくなる（2026-08-16 にそれで実機を半分壊した）。
+    // USB CDC が切れて焼けなくなる。
     //
     // m5c_battery_level() は 30 秒キャッシュだが、判定するのは無操作 1 分の
     // タイムアウト後なので遅れは問題にならない。
-    if (m5c_battery_level() >= BATTERY_POWERED_PCT) return;
+    if (on_wall_power()) return;
 
     if ((now_ms() - s_last_key_ms) < IDLE_LIGHT_MS) return;
 
@@ -1159,7 +1176,9 @@ void setup() {
     // ステータス行の表示が出ない理由の切り分けになる。
     // mV も出すのは、% が M5Unified のざっくり換算
     //（3300mV=0% / 4100mV=100%）で、充電中は張り付いて見えるため。
-    opur_log_add("電池 %d%% %dmV", m5c_battery_level(), m5c_battery_mv());
+    // usb= は給電判定の材料（スリープ抑制に使っている）。
+    opur_log_add("電池 %d%% %dmV usb%d",
+                 m5c_battery_level(), m5c_battery_mv(), m5c_usb_connected());
 
     // PSRAM。**この機体では常に 0K** で、それが正常。無印 / v1.1 / ADV は
     // どれも PSRAM を持たない ESP32-S3FN8（CLAUDE.md 参照。memory_type と

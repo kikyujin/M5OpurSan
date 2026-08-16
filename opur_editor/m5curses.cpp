@@ -321,6 +321,13 @@ int m5c_battery_mv(void) {
     return (int)M5.Power.getBatteryVoltage();   // 取れなければ 0
 }
 
+// ARDUINO_USB_CDC_ON_BOOT=1 / ARDUINO_USB_MODE=1 なので Serial は HWCDC。
+// bool 変換の実体は HWCDC::isCDC_Connected() で、直近に SOF が来ているか
+// （＝ホストが繋がっているか）を見ている。
+int m5c_usb_connected(void) {
+    return Serial ? 1 : 0;
+}
+
 // ---------------------------------------------------------------------------
 
 // sleep() はバックライトを 0 にしてからパネルにスリープコマンドを送る。
