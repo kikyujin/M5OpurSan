@@ -61,7 +61,10 @@ static int ready(void) {
 
 // 空きヒープ。内部 RAM と PSRAM を分けて出す。
 // mbedTLS は連続した大きい領域を要求するので、総量だけでなく塊も見る。
-// 「外」が 0K なら PSRAM 無しの機体（無印 Cardputer）、8000K 前後なら ADV。
+//
+// 「外」は**この機体では常に 0K**。無印 / v1.1 / ADV はどれも PSRAM を持たない
+// ESP32-S3FN8 なので、0K であることは機種の区別にならない（CLAUDE.md 参照）。
+// 出しているのは、PSRAM のある機体に載せ替えたときに気づけるようにするため。
 static void log_heap(const char *tag) {
     opur_log_add("%s 内%uK 塊%uK 外%uK", tag,
                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),

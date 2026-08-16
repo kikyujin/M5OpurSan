@@ -969,8 +969,13 @@ void setup() {
     //（3300mV=0% / 4100mV=100%）で、充電中は張り付いて見えるため。
     opur_log_add("電池 %d%% %dmV", m5c_battery_level(), m5c_battery_mv());
 
-    // PSRAM。0K なら載っていない = HTTPS が張れない（TLS に 40〜50KB 要る）。
-    // platformio.ini の memory_type と BOARD_HAS_PSRAM が対で要る。
+    // PSRAM。**この機体では常に 0K** で、それが正常。無印 / v1.1 / ADV は
+    // どれも PSRAM を持たない ESP32-S3FN8（CLAUDE.md 参照。memory_type と
+    // BOARD_HAS_PSRAM を足しても 0K のままだった）。
+    //
+    // 0K でも HTTPS は張れている。TLS に要る 45〜50KB は、描画 Canvas を
+    // 1bpp にして内部 RAM を 28KB 空けることで作っている（接続後 77K）。
+    // この行が意味を持つのは、PSRAM のある機体に載せ替えたときだけ。
     opur_log_add("PSRAM %uK",
                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 
