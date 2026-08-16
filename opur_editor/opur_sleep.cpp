@@ -58,6 +58,10 @@ int opur_sleep_key_wake_supported(void) {
     return is_adv() ? 1 : 0;
 }
 
+int opur_sleep_wake_cause(void) {
+    return cause_to_wake(esp_sleep_get_wakeup_cause());
+}
+
 int opur_sleep_light(uint32_t timer_ms) {
     if (!is_adv())    return OPUR_WAKE_OTHER;   // 起きられないので寝ない
     if (key_pending()) return OPUR_WAKE_KEY;    // もう押されている

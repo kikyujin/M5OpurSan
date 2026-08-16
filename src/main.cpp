@@ -695,6 +695,11 @@ static uint32_t now_ms(void) {
 static void light_sleep_cycle(void) {
     const bool had_wifi = opur_wifi_is_connected() != 0;
 
+    // 電力実験の材料。**1 周につきここ 1 行だけ**にしてある（ログは 32 行の
+    // リングなので、入眠と起床で 2 行使うと履歴が半分しか残らない）。
+    // 起床は「次の『寝る』が来ていること」で分かるので、別に出さなくていい。
+    opur_log_add("寝る 電池%d%% %dmV", m5c_battery_level(), m5c_battery_mv());
+
     m5c_display_off();
     if (had_wifi) opur_wifi_disconnect();
 
@@ -715,13 +720,8 @@ static void light_sleep_cycle(void) {
     m5c_display_on();
     if (had_wifi) opur_wifi_connect(&g_cfg);
 
-    // 電力実験の材料。1 周につき 1 行だけ残す（ログは 32 行のリング）。
-    opur_log_add("起床 電池%d%% %dmV",
-                 m5c_battery_level(), m5c_battery_mv());
-
     s_last_key_ms = now_ms();
 }
-
 
 // 無操作が続いていたら寝る。loop() の ERR 枝から毎回呼ばれる。
 static void idle_check(void) {
@@ -1090,6 +1090,23 @@ void setup() {
     crumb(CRUMB_VIEW_READY);
 
     opur_log_clear();
+
+    // ディープスリープからタイマーで起きただけなら、誰も待っていない。
+    // AUTOSAVE も読まず WiFi も繋がず、そのまま次の 2 分へ落とす。
+    // これが無いと、2 分ごとに起きては 11 分（1 分 + 10 分）起きたままになり、
+    // 寝かせた意味がほとんど無くなる。
+    //
+    // ページャー受信を入れるときは、この分岐が
+    // 「GET する → 何も無ければ寝る」の置き場になる。
+    //
+    // **view_init() より後に置いてある。** opur_sleep_deep() は
+    // M5.getBoard() を見てキーウェイクを張るかどうかを決めるので、
+    // M5 の初期化前に呼ぶと「タイマーでしか起きない」状態で寝てしまう。
+    // そうなるとキーを押しても戻ってこない機械になる。
+    if (opur_sleep_wake_cause() == OPUR_WAKE_TIMER) {
+        opur_log_add("タイマー復帰 電池%d%% → 再スリープ", m5c_battery_level());
+        opur_sleep_deep(DEEP_TIMER_MS);   // 戻らない
+    }
 
     // 前回が異常終了なら、どこまで進んでいたかを最初に出す。
     // 黙っているのは 1 電源投入 / 3 ソフトリセット / 8 ディープスリープ復帰。
