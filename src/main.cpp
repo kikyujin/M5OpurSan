@@ -684,6 +684,17 @@ static void autosave_restore(void) {
 // キーウェイクが使えない機体（無印 / v1.1）では**一切寝ない**。
 // 理由は opur_sleep.h の注記を参照。
 
+// **ディープスリープは止めてある。** 実装は入っていて（AUTOSAVE →
+// ext1 キーウェイク → 2 分タイマー）ビルドも通るが、実機で一度も
+// 通しで確認できていない。落ちると USB CDC が切れて焼けなくなるので、
+// 検証の段取りが取れるまでは入らないようにしておく。
+//
+// 1 に戻せばそのまま有効になる。そのときは
+//   - 焼く前に本体スイッチ OFF（CLAUDE.md 参照）
+//   - 10 分 → AUTOSAVE → ディープ → 2 分で自動復帰、を通しで確認する
+// ライトスリープ（1 分で画面 OFF・キーで復帰）は止めていない。
+#define DEEP_SLEEP_ENABLED 0
+
 #define IDLE_LIGHT_MS   60000UL   // 無操作 1 分でライトスリープ
 #define LIGHT_TOTAL_MS 600000UL   // ライトスリープ 10 分でディープへ
 #define DEEP_TIMER_MS  120000UL   // ディープからの復帰タイマー 2 分
@@ -720,12 +731,14 @@ static void light_sleep_cycle(void) {
     m5c_display_off();
     if (had_wifi) opur_wifi_disconnect();
 
-    // キーが来れば戻ってくる。10 分来なければタイマーで起きて次の段へ。
+    // キーが来れば戻ってくる。次の段（ディープ）へ進むためのタイマーは、
+    // ディープを止めているあいだは張らない —— 張っても 10 分後にただ起きて
+    // Active に戻るだけで、電気を使うだけになる。
     crumb(CRUMB_SLEEP_ENTER);
-    const int wake = opur_sleep_light(LIGHT_TOTAL_MS);
+    const int wake = opur_sleep_light(DEEP_SLEEP_ENABLED ? LIGHT_TOTAL_MS : 0);
     crumb2(CRUMB_SLEEP_WOKE, wake, 0);
 
-    if (wake == OPUR_WAKE_TIMER) {
+    if (DEEP_SLEEP_ENABLED && wake == OPUR_WAKE_TIMER) {
         // 画面も WiFi も落ちたまま、そのままディープへ落ちる。**戻らない。**
         // ここで点け直すと、誰も見ていない画面を数百 ms 光らせるだけになる。
         autosave_write();
