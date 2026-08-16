@@ -116,6 +116,14 @@ int m5c_battery_level(void);
 // 定期的に呼ぶ用途には向かない（起動ログ用）。
 int m5c_battery_mv(void);
 
+// 画面を消す / 点ける。スリープの前後で使う。
+//
+// 消すのはバックライトとパネルの両方（M5.Display.sleep()）。Canvas の中身は
+// 触らないので、点け直したあと refresh() すれば元の絵がそのまま出る。
+// 明るさは M5GFX 側が覚えていて、m5c_display_on() で元に戻る。
+void m5c_display_off(void);
+void m5c_display_on(void);
+
 // 属性のオン・オフ。
 //   A_REVERSE   前景色と背景色を入れ替える
 //   A_UNDERLINE 描いた文字列の下端に 1px の水平線を引く

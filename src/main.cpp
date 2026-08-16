@@ -20,6 +20,7 @@
 #include "opur_config.h"
 #include "opur_log.h"
 #include "opur_net.h"
+#include "opur_sleep.h"
 #include "opur_wifi.h"
 #include "utf8_utf16.h"
 #include "view.h"
@@ -30,6 +31,7 @@
 #include <esp_attr.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <esp_timer.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -594,6 +596,73 @@ static void wifi_catch_up(void) {
 }
 
 // ---------------------------------------------------------------------------
+// スリープ
+// ---------------------------------------------------------------------------
+//
+//   [Active] --1分無操作--> [Light Sleep] --10分--> [AUTOSAVE → Deep Sleep]
+//
+// 判定は loop() の「無操作で ERR が返った」枝に置いてある。getch() の中で
+// 寝たほうが反応は良いが、m5curses が電源管理を持つことになる。あそこは
+// PC 版と対になる curses 互換の薄層なので、役割を増やしたくない。
+//
+// **ライトスリープにタイマーを付けている。** 指示 2-1 には「タイマー不要」と
+// あるが、キーでしか起きないと 2-2 の「10 分で Deep Sleep」に永久に届かない。
+// キー以外で起きる理由が無い以上、10 分ぶんの累積カウントは
+// 「10 分のタイマーを 1 本張る」のと同じことになる。
+//
+// キーウェイクが使えない機体（無印 / v1.1）では**一切寝ない**。
+// 理由は opur_sleep.h の注記を参照。
+
+#define IDLE_LIGHT_MS   60000UL   // 無操作 1 分でライトスリープ
+#define LIGHT_TOTAL_MS 600000UL   // ライトスリープ 10 分でディープへ
+
+// 最後にキーが来た時刻（ms）。
+//
+// millis() ではなく esp_timer_get_time() を使うのは、このファイルに Arduino の
+// ヘッダを持ち込まないため（flash_status が delay() を避けているのと同じ理由）。
+static uint32_t s_last_key_ms = 0;
+
+static uint32_t now_ms(void) {
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+// 画面と WiFi を落としてライトスリープに入り、起きたら戻す。
+//
+// バッファは RAM 上にそのまま残る（ライトスリープは RAM を保持する）ので、
+// 復帰後は loop() の次の view_draw() が続きを描くだけでいい。
+//
+// WiFi は落とす。このビルドには CONFIG_PM_ENABLE が入っておらず自動ライト
+// スリープが使えないため、手で寝ている間は WiFi のタスクも止まってビーコンを
+// 取りこぼす。繋いだままにすると AP から切られる。再接続は実測 100ms。
+static void light_sleep_cycle(void) {
+    const bool had_wifi = opur_wifi_is_connected() != 0;
+
+    m5c_display_off();
+    if (had_wifi) opur_wifi_disconnect();
+
+    opur_sleep_light(0);          // キーでしか起きない
+
+    // 先に画面を点ける。Canvas は触っていないので直前の絵がそのまま出る。
+    // WiFi の再接続は最大 3 秒ブロックするので、そのあとに回す。
+    m5c_display_on();
+    if (had_wifi) opur_wifi_connect(&g_cfg);
+
+    // 電力実験の材料。1 周につき 1 行だけ残す（ログは 32 行のリング）。
+    opur_log_add("起床 電池%d%% %dmV",
+                 m5c_battery_level(), m5c_battery_mv());
+
+    s_last_key_ms = now_ms();
+}
+
+// 無操作が続いていたら寝る。loop() の ERR 枝から毎回呼ばれる。
+static void idle_check(void) {
+    if (!opur_sleep_key_wake_supported()) return;   // 起きられないので寝ない
+    if ((now_ms() - s_last_key_ms) < IDLE_LIGHT_MS) return;
+
+    light_sleep_cycle();
+}
+
+// ---------------------------------------------------------------------------
 // ログ画面
 // ---------------------------------------------------------------------------
 //
@@ -994,6 +1063,8 @@ void setup() {
     // 起動は常に空バッファから。前回の書きかけは復元しない（021）。
     g_dirty = false;
 
+    s_last_key_ms = now_ms();
+
     timeout(IDLE_REDRAW_MS);
     crumb(CRUMB_SETUP_END);
 }
@@ -1122,8 +1193,11 @@ void loop() {
     // 時計が描き直される。起動時に間に合わなかった WiFi もここで拾う。
     if (ch == ERR) {
         wifi_catch_up();
+        idle_check();
         return;
     }
+
+    s_last_key_ms = now_ms();
 
     // 本文が実際に増減したときだけ dirty にする。
     // 「キーが来たら dirty」にすると、候補を眺めただけでも未保存扱いになり、

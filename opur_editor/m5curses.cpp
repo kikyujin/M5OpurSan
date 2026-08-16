@@ -323,6 +323,18 @@ int m5c_battery_mv(void) {
 
 // ---------------------------------------------------------------------------
 
+// sleep() はバックライトを 0 にしてからパネルにスリープコマンドを送る。
+// wakeup() は明るさを元に戻すところまでやってくれる（M5GFX が覚えている）。
+void m5c_display_off(void) {
+    M5Cardputer.Display.sleep();
+}
+
+void m5c_display_on(void) {
+    M5Cardputer.Display.wakeup();
+}
+
+// ---------------------------------------------------------------------------
+
 void timeout(int ms) {
     g_timeout_ms = ms;
 }

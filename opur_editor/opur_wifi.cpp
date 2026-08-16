@@ -113,6 +113,18 @@ int opur_wifi_connect(const OpurConfig *cfg) {
     return opur_wifi_is_connected();
 }
 
+void opur_wifi_disconnect(void) {
+    // 自動再接続を先に切る。切らずに disconnect すると、裏で即座に
+    // 繋ぎ直しにいく（opur_wifi_connect() が毎回 true を立てているので、
+    // 対で使うぶんには次の接続で戻る）。
+    WiFi.setAutoReconnect(false);
+    WiFi.disconnect(true);      // true = WiFi を落とす
+    WiFi.mode(WIFI_OFF);
+
+    // 時刻は ESP32 の RTC が持っているので、繋ぎ直しても NTP は要らない。
+    // g_ntp_done は落とさない。
+}
+
 int opur_wifi_ntp_sync(uint32_t timeout_ms) {
     struct tm t;
 

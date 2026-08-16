@@ -42,6 +42,13 @@ int opur_wifi_connect(const OpurConfig *cfg);
 // 今つながっているか。ブロックしない。
 int opur_wifi_is_connected(void);
 
+// WiFi を落とす。スリープの前に呼ぶ。
+//
+// **自動再接続も切る。**切らないと、こちらが落としたそばから
+// 裏で繋ぎ直しにいってしまう。opur_wifi_connect() が呼ばれたときに
+// また立てるので、対で使うぶんには意識しなくていい。
+void opur_wifi_disconnect(void);
+
 // NTP 同期。未接続なら何もせず 0、同期済みなら即 1。
 // 二重同期しないようフラグを内部に持つ。
 //
