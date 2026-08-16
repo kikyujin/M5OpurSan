@@ -962,6 +962,13 @@ void setup() {
     }
     opur_log_add("SD: %s",  m5c_sd_ready()  ? "OK" : "マウント失敗");
 
+    // 電池。Cardputer は PMIC が無く GPIO10 の分圧を ADC1 で読んでいる。
+    // ボード判定に失敗すると % が -2 になるので、ここで出るかどうかが
+    // ステータス行の表示が出ない理由の切り分けになる。
+    // mV も出すのは、% が M5Unified のざっくり換算
+    //（3300mV=0% / 4100mV=100%）で、充電中は張り付いて見えるため。
+    opur_log_add("電池 %d%% %dmV", m5c_battery_level(), m5c_battery_mv());
+
     // PSRAM。0K なら載っていない = HTTPS が張れない（TLS に 40〜50KB 要る）。
     // platformio.ini の memory_type と BOARD_HAS_PSRAM が対で要る。
     opur_log_add("PSRAM %uK",

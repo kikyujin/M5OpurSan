@@ -289,6 +289,38 @@ int m5c_sd_ready(void) {
     return g_sd_ok ? 1 : 0;
 }
 
+// バッテリー残量。ADC を叩くのは 30 秒に 1 回だけで、あいだはキャッシュを返す。
+//
+// getBatteryLevel() は毎回 ADC を 1 回読んで較正表を引くだけなので重くはないが、
+// 描画のたびに呼ぶ意味も無い。間引きをここに置いたのは、呼び出し側の
+// view_m5.c が C で millis() を持たないため。
+//
+// 初回だけ M5Unified が較正構造体を calloc する（数十バイト・一度きり）。
+// ヒープを継続的に食わないので、TLS の枠には影響しない。
+int m5c_battery_level(void) {
+    constexpr uint32_t kIntervalMs = 30000;
+
+    static int      cached = -1;
+    static uint32_t last   = 0;
+    static bool     primed = false;   // 一度でも読んだか
+
+    const uint32_t now = millis();
+
+    // 起動直後は now が小さく last == 0 と区別できないので、
+    // 経過ではなく primed で初回を判定する。
+    // 失敗（負）もそのままキャッシュする。毎描画で ADC を叩き直さないため。
+    if (!primed || (uint32_t)(now - last) >= kIntervalMs) {
+        primed = true;
+        cached = (int)M5.Power.getBatteryLevel();   // 取れなければ負
+        last   = now;
+    }
+    return cached;
+}
+
+int m5c_battery_mv(void) {
+    return (int)M5.Power.getBatteryVoltage();   // 取れなければ 0
+}
+
 // ---------------------------------------------------------------------------
 
 void timeout(int ms) {

@@ -11,7 +11,8 @@
 //   ---      1px の仕切り線（m5curses が行の隙間として持っている）
 //   行 6     FEP 入力行（未確定なので下線）
 //   行 7     候補バー（選択中の候補だけ反転。PC 版と同じ）
-//            候補バーが出ていないときは、右端 5 桁に時計を出す
+//            候補バーが出ていないときは、ここをステータス行に使う
+//            （左に文字数、右にバッテリーと時計。draw_status を参照）
 //
 // PC 版にあった枠線とステータスバーは無い。実機は 8 行しか無いので、
 // 枠を描くと本文が入らない。本文との区切りは仕切り線が受け持つ。
@@ -21,6 +22,7 @@
 #include "m5curses.h"
 #include "utf8_utf16.h"
 
+#include <stdio.h>
 #include <time.h>
 
 // 本文 1 行ぶんの UTF-8 バッファ。30 半角 = 最大 30 文字、全角は 3 バイトなので 90。
@@ -205,23 +207,56 @@ static void draw_cand(const CandBar* bar) {
 }
 
 // ---------------------------------------------------------------------------
-// 時計
+// ステータス行
 // ---------------------------------------------------------------------------
 //
-// 候補バーが出ていないとき、行 7 の右端 5 桁に "HH:MM" を出す。
-// 候補バーは右端まで伸びうるので、出ているときは譲る。
+// 候補バーが出ていないとき、行 7 を文字数・バッテリー・時計に使う。
+// 候補バーは右端まで伸びうるので、出ているときは行ごと譲る（何も出さない）。
 //
-// 時刻は NTP で合わせている（opur_wifi.c）。合っていなければ 1970 年が
-// 返るので、そのときは何も出さない。嘘の時刻を出すより無いほうがいい。
+//   000/512               75% HH:MM
+//   |<-7->|<---- 13 ---->|<4>|<-5->|
+//    左詰め                  右詰め
+//
+// 中央の 13 桁は空けてある（将来のページャー表示用）。
+//
+// 桁が動かないように、文字数もバッテリーもゼロ詰め・右詰めにしてある。
+// 絵文字（🔋）は使えない —— efont は JIS X 0208 までで豆腐になる。
+// Canvas が 1bpp なので色分けもできない（CLAUDE.md 参照）。
 //
 // 再描画は loop() が回るたび。無操作でも getch() が IDLE_REDRAW_MS（30 秒）で
 // ERR を返して一巡するので、分の変わり目からは最大 30 秒遅れで追いつく。
 //
 // **この時計のためだけに loop() を定期的に起こしている。** 待ち切る
 // （timeout(-1)）と再描画が来ないので、時計は止まったまま動かない。
+// バッテリーの実測間隔（m5curses 側で 30 秒）も、これと同じ周期に乗っている。
 
-#define CLOCK_COLS 5
+#define CLOCK_COLS 5                          // "HH:MM"
+#define BATT_COLS  4                          // "100%" / " 75%"
+#define CLOCK_X    (OPUR_COLS - CLOCK_COLS)             // 25
+#define BATT_X     (CLOCK_X - 1 - BATT_COLS)            // 20（間に空白 1 桁）
 
+// 文字数。ed->len は UTF-16 単位で 0〜OPUR_BUF_MAX。
+static void draw_count(const OpurEditor* ed) {
+    char buf[16];
+
+    snprintf(buf, sizeof(buf), "%03d/%d", ed->len, OPUR_BUF_MAX);
+    mvaddstr(ROW_CAND, 0, buf);
+}
+
+// バッテリー残量。取れないときは何も出さない（嘘を出すより無いほうがいい）。
+static void draw_battery(void) {
+    char buf[8];
+    int  level = m5c_battery_level();
+
+    if (level < 0) return;
+    if (level > 100) level = 100;
+
+    snprintf(buf, sizeof(buf), "%3d%%", level);   // 右詰め。右端が動かない
+    mvaddstr(ROW_CAND, BATT_X, buf);
+}
+
+// 時刻は NTP で合わせている（opur_wifi.c）。合っていなければ 1970 年が
+// 返るので、そのときは何も出さない。嘘の時刻を出すより無いほうがいい。
 static void draw_clock(void) {
     time_t     now = time(NULL);
     struct tm  t;
@@ -232,7 +267,13 @@ static void draw_clock(void) {
     if (t.tm_year <= (2016 - 1900)) return;   // 未同期
 
     strftime(buf, sizeof(buf), "%H:%M", &t);
-    mvaddstr(ROW_CAND, OPUR_COLS - CLOCK_COLS, buf);
+    mvaddstr(ROW_CAND, CLOCK_X, buf);
+}
+
+static void draw_status(const OpurEditor* ed) {
+    draw_count(ed);
+    draw_battery();
+    draw_clock();
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +316,7 @@ void view_draw(const OpurEditor* ed,
     } else {
         draw_fep(fep_buf, fep_len);
         if (bar) draw_cand(bar);
-        else     draw_clock();      // 候補バーが出ていないときだけ
+        else     draw_status(ed);   // 候補バーが出ていないときだけ
     }
 
     m5c_separator();
