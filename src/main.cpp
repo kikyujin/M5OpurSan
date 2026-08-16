@@ -125,6 +125,12 @@ static inline void crumb(uint32_t v) { crumb2(v, 0, 0); }
 #define CRUMB_DRAW          20
 #define CRUMB_GETCH         21
 #define CRUMB_KEY           24   /* 22/23 は NVS 退避用だった。021 で撤去 */
+// スリープ経路。ここで落ちると WDT リセットになり、パニック経路を通らないので
+// **コアダンプが残らない**（2026-08-16 に実際に踏んだ）。落ちた場所を知る手段が
+// パンくずしか無いため、突入前・復帰直後・ディープ突入前の 3 点に置いてある。
+#define CRUMB_SLEEP_ENTER   25
+#define CRUMB_SLEEP_WOKE    26   /* a = 起きた理由（OPUR_WAKE_*） */
+#define CRUMB_SLEEP_DEEP    27
 
 static const char *crumb_text(uint32_t c) {
     switch (c) {
@@ -136,6 +142,9 @@ static const char *crumb_text(uint32_t c) {
     case CRUMB_DRAW:        return "描画中";
     case CRUMB_GETCH:       return "キー待ち";
     case CRUMB_KEY:         return "キー処理中";
+    case CRUMB_SLEEP_ENTER: return "スリープ突入";
+    case CRUMB_SLEEP_WOKE:  return "スリープ復帰";
+    case CRUMB_SLEEP_DEEP:  return "ディープ突入";
     default:                return "?";
     }
 }
@@ -704,7 +713,9 @@ static void light_sleep_cycle(void) {
     if (had_wifi) opur_wifi_disconnect();
 
     // キーが来れば戻ってくる。10 分来なければタイマーで起きて次の段へ。
+    crumb(CRUMB_SLEEP_ENTER);
     const int wake = opur_sleep_light(LIGHT_TOTAL_MS);
+    crumb2(CRUMB_SLEEP_WOKE, wake, 0);
 
     if (wake == OPUR_WAKE_TIMER) {
         // 画面も WiFi も落ちたまま、そのままディープへ落ちる。**戻らない。**
@@ -712,6 +723,7 @@ static void light_sleep_cycle(void) {
         autosave_write();
         opur_log_add("deep sleep へ 電池%d%% %dmV",
                      m5c_battery_level(), m5c_battery_mv());
+        crumb(CRUMB_SLEEP_DEEP);
         opur_sleep_deep(DEEP_TIMER_MS);
     }
 
