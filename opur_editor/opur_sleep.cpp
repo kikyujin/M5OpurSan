@@ -32,6 +32,38 @@ bool is_adv() {
     return M5.getBoard() == m5::board_t::board_M5CardputerADV;
 }
 
+// TCA8418（ADV のキーボード IC）。M5Cardputer ライブラリが
+// Adafruit_TCA8418 の既定値として使っているのと同じ、アドレス 0x34 /
+// 400kHz / M5Unified の内部 I2C。レジスタ番号も同ライブラリの
+// Adafruit_TCA8418_registers.h と同じ。
+//
+// ライブラリの内部ヘッダを include せず番号を持っているのは、
+// あちらの置き場（.pio/libdeps の奥）に依存したくないため。
+constexpr uint8_t  kTcaAddr        = 0x34;
+constexpr uint32_t kTcaFreq        = 400000;
+constexpr uint8_t  kTcaRegIntStat  = 0x02;
+constexpr uint8_t  kTcaRegKeyEvent = 0x04;
+
+// 溜まっているキーイベントを吸い出して INT を HIGH に戻す。
+//
+// **これをやらないと、起こしたキーで INT が LOW のまま固まる。**
+// TCA8418 の INT が下がるのは FIFO を読んだときだけで、読みにいくのは
+// ドライバの update()。その update() は ISR がフラグを立てたときしか動かない。
+// スリープ中に押されたぶんは ISR を通らないので、誰も読みにいかない
+// —— 結果、以降エッジが二度と出ずキーボードが黙る（実機で踏んだ）。
+//
+// ここで読んでしまうので、**起こしたキーは入力されない。**
+// 目を覚ますための一打ちが文字にならないのは、むしろ普通の挙動。
+void drain_keyboard() {
+    // 0 が返れば空（ライブラリの flush() と同じ判定）。
+    // I2C が応答しないと 0 が返るので、その場合もここで抜ける。
+    // 上限を切ってあるのは、万一 0 以外を返し続けても回り続けないため。
+    for (int i = 0; i < 16; i++) {
+        if (M5.In_I2C.readRegister8(kTcaAddr, kTcaRegKeyEvent, kTcaFreq) == 0) break;
+    }
+    M5.In_I2C.writeRegister8(kTcaAddr, kTcaRegIntStat, 3, kTcaFreq);
+}
+
 // 寝る直前にキーが押されている（INT が LOW のまま）かどうか。
 //
 // TCA8418 の INT はレベル出力で、I2C で FIFO を読んで INT_STAT を
@@ -111,10 +143,10 @@ int opur_sleep_light(uint32_t timer_ms) {
     // 配送を戻す。**この順序でないと意味が無い。**
     // gpio_wakeup_disable() は種別までは戻してくれない。
     //
-    // 起こしたキーのイベントは取りこぼさない。割り込みステータスのビットは
-    // 立てた側がクリアするまで残るので、寝ているあいだに立ったビットが
-    // gpio_intr_enable() の時点で配送され、TCA8418 のドライバが
-    // フラグを立てて I2C で FIFO を読みにいく。
+    // 配送を戻す前に FIFO を空にして INT を HIGH に戻しておく。
+    // ここを飛ばすと復帰後にキーが一切効かなくなる（drain_keyboard の注記）。
+    drain_keyboard();
+
     gpio_set_intr_type(kKeyIntPin, GPIO_INTR_ANYEDGE);
     gpio_intr_enable(kKeyIntPin);
 
