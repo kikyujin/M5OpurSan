@@ -16,6 +16,22 @@
 #include <driver/gpio.h>
 #include <esp_sleep.h>
 
+// **ライトスリープを止めてある。**
+//
+// ライトスリープ中、USB を挿していてもバッテリーが充電されないことが実機で
+// 分かった（2026-08-17）。原因が確定するまで丸ごと無効にして常時 Active で動かす。
+// 調査結果は ~/claude-store/orders/done/
+// 2026-08-17-001_m5unified-charge-gpio-investigation_result.md。
+// M5Unified にも ESP32 側にも充電経路を切る要素は見つからなかったので、
+// 疑いは USB ホストが VBUS を絞る側にある。
+//
+// 1 に戻せばそのまま有効になる。**実装は消していない**ので、
+// 戻したときにビルドが通らなくなることはない。
+//
+// これを 0 にしても、寝る前の画面 OFF / WiFi 切断は呼び出し側の担当なので
+// そちらでも止める必要がある（src/main.cpp の idle_check を参照）。
+#define LIGHT_SLEEP_ENABLED 0
+
 namespace {
 
 // Cardputer ADV の TCA8418（I2C キーボード）の INT ピン。
@@ -90,11 +106,17 @@ int opur_sleep_key_wake_supported(void) {
     return is_adv() ? 1 : 0;
 }
 
+int opur_sleep_light_enabled(void) {
+    return LIGHT_SLEEP_ENABLED;
+}
+
 int opur_sleep_wake_cause(void) {
     return cause_to_wake(esp_sleep_get_wakeup_cause());
 }
 
 int opur_sleep_light(uint32_t timer_ms) {
+    if (!LIGHT_SLEEP_ENABLED) return OPUR_WAKE_OTHER;   // 充電の件で停止中
+
     if (!is_adv())    return OPUR_WAKE_OTHER;   // 起きられないので寝ない
     if (key_pending()) return OPUR_WAKE_KEY;    // もう押されている
 

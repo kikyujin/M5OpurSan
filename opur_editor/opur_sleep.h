@@ -42,12 +42,26 @@ int opur_sleep_key_wake_supported(void);
 // 電源投入や通常のリセットでは OPUR_WAKE_OTHER。
 int opur_sleep_wake_cause(void);
 
+// ライトスリープが有効か（1/0）。
+//
+// **いまは 0（無効）。** ライトスリープ中に USB を挿していてもバッテリーが
+// 充電されない件を調査中のため、丸ごと止めて「常時 Active」にしてある
+// （2026-08-17）。実装は残してあり、opur_sleep.cpp の LIGHT_SLEEP_ENABLED を
+// 1 に戻せばそのまま生き返る。
+//
+// **呼び出し側（src/main.cpp の idle_check）はこれを見て、寝る手前で引き返す。**
+// opur_sleep_light() 自身も 0 のときは何もせず返すが、それだけだと
+// 画面 OFF / WiFi 切断（どちらも呼び出し側の担当）を毎回やって即座に戻す
+// ことになり、無操作中ずっと画面のチラつきと再接続を繰り返してしまう。
+int opur_sleep_light_enabled(void);
+
 // ライトスリープに入る。RAM は保持されるので、戻ってきたら続きから動く。
 //
 //   timer_ms  0 より大きければタイマーでも起きる。0 ならキーだけ
 //
 // 戻り値は OPUR_WAKE_*。キーウェイクが使えない機体、または寝る時点で
 // 既にキーが押されている場合は、寝ずに OPUR_WAKE_KEY / OPUR_WAKE_OTHER を返す。
+// opur_sleep_light_enabled() が 0 のときも寝ずに OPUR_WAKE_OTHER を返す。
 //
 // **画面と WiFi はここでは触らない。**呼び出し側の責任
 // （どちらもこの層より上の関心事で、復帰後の描き直しと対で扱いたいため）。

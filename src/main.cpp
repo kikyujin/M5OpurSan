@@ -782,6 +782,14 @@ static bool on_wall_power(void) {
 
 // 無操作が続いていたら寝る。loop() の ERR 枝から毎回呼ばれる。
 static void idle_check(void) {
+    // ライトスリープを止めているあいだは、寝る手前で引き返す。
+    //
+    // **opur_sleep_light() 側の停止だけでは足りない。** あちらが即座に返しても、
+    // light_sleep_cycle() の画面 OFF / WiFi 切断はこちらの担当なので、
+    // 無操作のあいだ「消して点けて、切って繋いで」を延々と繰り返してしまう。
+    // 理由と復活の手順は opur_sleep.h の opur_sleep_light_enabled() の注記。
+    if (!opur_sleep_light_enabled()) return;
+
     if (!opur_sleep_key_wake_supported()) return;   // 起きられないので寝ない
 
     // 給電中は寝ない。省電力の意味が無いうえ、ディープスリープに落ちると
