@@ -740,6 +740,25 @@ static void light_sleep_cycle(void) {
     const int wake = opur_sleep_light(DEEP_SLEEP_ENABLED ? LIGHT_TOTAL_MS : 0);
     crumb2(CRUMB_SLEEP_WOKE, wake, 0);
 
+    // **検証ブランチ（verify-charger-autooff）限定の 1 行。**
+    //
+    // 入眠と起床の mV を並べて、寝ているあいだに充電されたかを見る。
+    // 充電器のオートオフ説（仮説 F）を実機で確かめるためのもので、
+    // main には持っていかない。
+    //
+    // **画面と WiFi を戻す前に読む。** ここが寝ていたときの状態にいちばん近い。
+    // あとに回すとバックライトと WiFi の負荷が乗ってしまい、
+    // 「低負荷だから充電器が切れた」のかどうかが見えなくなる
+    // （負荷が戻った瞬間に充電器が復帰すると mV が跳ねる）。
+    //
+    // mV は毎回 ADC を読む。% のほうは 30 秒キャッシュだが、
+    // 検証は 30 分放置なので必ず読み直される（m5curses.cpp の注記）。
+    //
+    // **ログは 32 行のリング。**これで 1 周につき 2 行使うので履歴は半分になる。
+    // 前後比較を 1 箇所で見るためにあえてそうしている。
+    opur_log_add("起床 電池%d%% %dmV",
+                 m5c_battery_level(), m5c_battery_mv());
+
     if (DEEP_SLEEP_ENABLED && wake == OPUR_WAKE_TIMER) {
         // 画面も WiFi も落ちたまま、そのままディープへ落ちる。**戻らない。**
         // ここで点け直すと、誰も見ていない画面を数百 ms 光らせるだけになる。
