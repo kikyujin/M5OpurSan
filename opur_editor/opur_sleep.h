@@ -44,10 +44,8 @@ int opur_sleep_wake_cause(void);
 
 // ライトスリープが有効か（1/0）。
 //
-// **main では 0（無効）、検証ブランチ verify-charger-autooff では 1。**
-// ライトスリープ中に USB を挿していてもバッテリーが充電されない件を調査中で、
-// main は丸ごと止めて「常時 Active」にしてある（2026-08-17）。
-// 実体は opur_sleep.cpp の LIGHT_SLEEP_ENABLED（経緯もそこに書いてある）。
+// **いまは 1（有効）。** 実体は opur_sleep.cpp の LIGHT_SLEEP_ENABLED。
+// 「充電されない」疑いで一度 0 にしたが再現せず戻した経緯も、そちらに書いてある。
 //
 // **呼び出し側（src/main.cpp の idle_check）はこれを見て、寝る手前で引き返す。**
 // opur_sleep_light() 自身も 0 のときは何もせず返すが、それだけだと
