@@ -129,12 +129,18 @@ int opur_index_at_col(const OpurEditor* ed, const OpurLayout* lay,
 // スクロール
 // ---------------------------------------------------------------------------
 
-void opur_update_scroll(OpurEditor* ed) {
-    OpurLayout lay;
+// レイアウト済みのものを使うスクロール更新。
+//
+// **OpurLayout をスタックに積むのはこのファイルで 1 枚だけにすること。**
+// OPUR_MAX_LINES 行ぶんで約 8.2KB あり、実機の loop タスクのスタックは 16KB
+// しかない。2 枚積むと溢れる。溢れた先はスタックの下に隣接するヒープで、
+// そこには起動時に確保された NVS のオブジェクトが居る。壊れても即死せず、
+// **後から WiFi ドライバが NVS を読んだときに落ちる**（2026-08-17 に実機で確定。
+// ↑↓ を押すと move_vertical と opur_update_scroll で 8.2KB が 2 枚積まれていた）。
+static void update_scroll_lay(OpurEditor* ed, const OpurLayout* lay) {
     int line, max_top;
 
-    opur_layout(ed, &lay);
-    line = opur_cursor_line(&lay, ed->cursor);
+    line = opur_cursor_line(lay, ed->cursor);
 
     if (line < ed->scroll_top) {
         ed->scroll_top = line;
@@ -144,10 +150,17 @@ void opur_update_scroll(OpurEditor* ed) {
     }
 
     // 削除で行数が減ったときに scroll_top が浮かないようクランプ。
-    max_top = lay.count - OPUR_ROWS;
+    max_top = lay->count - OPUR_ROWS;
     if (max_top < 0) max_top = 0;
     if (ed->scroll_top > max_top) ed->scroll_top = max_top;
     if (ed->scroll_top < 0)       ed->scroll_top = 0;
+}
+
+void opur_update_scroll(OpurEditor* ed) {
+    OpurLayout lay;
+
+    opur_layout(ed, &lay);
+    update_scroll_lay(ed, &lay);
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +224,7 @@ static void move_vertical(OpurEditor* ed, int delta) {
     if (target >= lay.count) {
         ed->cursor   = ed->len;
         ed->goal_col = -1;
-        opur_update_scroll(ed);
+        update_scroll_lay(ed, &lay);
         return;
     }
 
@@ -221,7 +234,12 @@ static void move_vertical(OpurEditor* ed, int delta) {
         ed->goal_col = opur_cursor_col(ed, &lay, line, ed->cursor);
     }
     ed->cursor = opur_index_at_col(ed, &lay, target, ed->goal_col);
-    opur_update_scroll(ed);
+
+    // opur_update_scroll() ではなく、いま作った lay を渡す。レイアウトは buf と
+    // len だけで決まり、カーソルを動かしても変わらないので使い回してよい。
+    // 呼ぶと 8.2KB がもう 1 枚積まれてスタックが溢れる（このファイルの
+    // update_scroll_lay の注記を参照）。
+    update_scroll_lay(ed, &lay);
 }
 
 void opur_up(OpurEditor* ed)   { move_vertical(ed, -1); }

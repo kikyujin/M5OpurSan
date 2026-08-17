@@ -32,6 +32,8 @@
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -723,10 +725,10 @@ static void light_sleep_cycle(void) {
     // 電力実験の材料。**1 周につきここ 1 行だけ**にしてある（ログは 32 行の
     // リングなので、入眠と起床で 2 行使うと履歴が半分しか残らない）。
     // 起床は「次の『寝る』が来ていること」で分かるので、別に出さなくていい。
-    // usb= は給電判定の材料。寝たということは 0 のはずで、1 が出ていたら
+    // 寝たということは 100% 未満だったはず。100% が出ていたら
     // on_wall_power() の判定が抜けている。
-    opur_log_add("寝る 電池%d%% %dmV usb%d",
-                 m5c_battery_level(), m5c_battery_mv(), m5c_usb_connected());
+    opur_log_add("寝る 電池%d%% %dmV",
+                 m5c_battery_level(), m5c_battery_mv());
 
     m5c_display_off();
     if (had_wifi) opur_wifi_disconnect();
@@ -759,23 +761,23 @@ static void light_sleep_cycle(void) {
 // 給電されているか。
 //
 // Cardputer では充電中かどうかを直接取れない（M5Unified の isCharging() は
-// この機種を扱わない）ので、目印を 2 つ or で見る。
+// この機種を扱わない）ので、目印は残量 100% ひとつだけ。
 //
-//   (1) 残量 100%
-//       **本体スイッチ OFF のときだけ当てになる。** その場合 USB が唯一の
-//       電源なので必ず 100% を指す。スイッチ ON だとバッテリーの実残量が
-//       出るため、充電中でも 100% に届かない（マスターの実機観察）。
-//   (2) USB CDC が繋がっている
-//       PC に挿さっている状態。**焼く可能性がある状態**でもあるので、
-//       ここで寝られると USB CDC が切れて焼けなくなる
-//       （2026-08-16 にそれで実機を半分壊した）。
+// **これが当てになるのは本体スイッチ OFF のとき。** その場合 USB が唯一の
+// 電源なので必ず 100% を指す。スイッチ ON だとバッテリーの実残量が出るため、
+// 充電中でも 100% に届かない（マスターの実機観察）。
+//
+// **焼くときにスイッチ OFF で繋ぐのはこのため。** 判定はこの 1 本しか無く、
+// USB が挿さっているかは見ていない（見られるものが無い。m5curses.h の注記を
+// 参照）。ここで寝られると USB CDC が切れて焼けなくなる
+// （2026-08-16 にそれで実機を半分壊した）。
 //
 // 残る穴は「スイッチ ON ＋ 充電器だけ ＋ 満充電でない」。ホストが居ないので
 // 焼く事故は起きず、寝ても充電は続くので実害は小さい。
 #define BATTERY_POWERED_PCT 100
 
 static bool on_wall_power(void) {
-    return m5c_battery_level() >= BATTERY_POWERED_PCT || m5c_usb_connected();
+    return m5c_battery_level() >= BATTERY_POWERED_PCT;
 }
 
 // 無操作が続いていたら寝る。loop() の ERR 枝から毎回呼ばれる。
@@ -1189,9 +1191,9 @@ void setup() {
     // ステータス行の表示が出ない理由の切り分けになる。
     // mV も出すのは、% が M5Unified のざっくり換算
     //（3300mV=0% / 4100mV=100%）で、充電中は張り付いて見えるため。
-    // usb= は給電判定の材料（スリープ抑制に使っている）。
-    opur_log_add("電池 %d%% %dmV usb%d",
-                 m5c_battery_level(), m5c_battery_mv(), m5c_usb_connected());
+    // 100% はスリープ抑制の判定でもある（on_wall_power() を参照）。
+    opur_log_add("電池 %d%% %dmV",
+                 m5c_battery_level(), m5c_battery_mv());
 
     // PSRAM。**この機体では常に 0K** で、それが正常。無印 / v1.1 / ADV は
     // どれも PSRAM を持たない ESP32-S3FN8（CLAUDE.md 参照。memory_type と
@@ -1329,6 +1331,24 @@ static void handle_key(int ch) {
     }
 }
 
+// loop タスクのスタックの残りを見張る。
+//
+// ↑↓ で OpurLayout（8.2KB）が 2 枚積まれて 16KB のスタックを溢れ、下に隣接する
+// ヒープに居た NVS のオブジェクトを壊していた（2026-08-17）。壊れても即死せず、
+// **あとで WiFi ドライバが NVS を読んだときに落ちる**ので、スタック側からは
+// 何も見えない。直したあとも余裕がどれだけあるかを実機で見えるようにしておく。
+//
+// **減ったときだけ出す。** 毎周回出すとログの 32 行がこれで埋まる。
+// uxTaskGetStackHighWaterMark() は ESP-IDF ではバイトを返す。
+static void watch_stack(void) {
+    static unsigned s_logged = 0xFFFFFFFFu;
+    const unsigned left = (unsigned)uxTaskGetStackHighWaterMark(NULL);
+
+    if (left + 256 > s_logged) return;   // 256B 以上減ったときだけ
+    s_logged = left;
+    opur_log_add("stack 残り%uB", left);
+}
+
 void loop() {
     static UTF16 pending[FEP_MAXBUFF];
     int pending_len = fep_pending(pending, FEP_MAXBUFF);
@@ -1375,6 +1395,7 @@ void loop() {
 
         crumb(CRUMB_KEY);
         handle_key(ch);
+        watch_stack();      // いちばん深く潜った直後に測る
 
         if (before_mode != MODE_MENU && g_ed.len != before_len) g_dirty = true;
     }

@@ -62,6 +62,51 @@ Canvas が 8bpp だった頃は接続後 44KB しか残らず、**HTTPS が張�
 
 これ以上メモリが要るときの候補: `CandBar`（静的 84KB）の縮小。
 
+## スタックを溢れさせると、落ちるのは WiFi タスク
+
+loop タスクのスタックは 16KB（`-DARDUINO_LOOP_STACK_SIZE=16384`）。
+**`OpurLayout` は約 8.2KB あるので、スタックに 2 枚積むと溢れる。**
+
+2026-08-17 に踏んだ。`move_vertical()` が `OpurLayout` を積んだまま
+`opur_update_scroll()` を呼び、そこでもう 1 枚積んでいた（合計 17136B）。
+**↑↓ を押すたびに 752B はみ出していた。**
+
+**溢れた先はヒープ。** loop タスクのスタックはヒープから取られていて、
+スタックは下に伸びるので、はみ出したぶんは**下に隣接するヒープブロック**を潰す。
+そこに居たのが、起動時（`initArduino()` の `nvs_flash_init()`。loopTask 生成より
+前に走る）に確保された **NVS のオブジェクト**だった。
+
+症状の出方がひどい:
+
+- 壊した瞬間は何も起きない。**あとで NVS を読んだ誰かが落ちる**
+- このアプリで NVS を読むのは WiFi ドライバだけ。圏外だと Arduino core が
+  数秒おきに `WiFi.begin()` を回す（`WiFiGeneric.cpp` の自動再接続。
+  `NO_AP_FOUND` も再接続の対象）ので、そのたびに地雷を踏みにいく
+- **落ちるのは ppTask で、パンくずは 21「キー待ち」**（loop は待っているだけ）
+- **WiFi 設定を消すと再現しなくなる。** 壊れていないのではなく読む者がいないだけ
+- 壊れ方が毎回違う。書き込まれるのが本文のレイアウト（行の start/end）なので、
+  開いていたファイルによって値が変わる
+
+**「NVS で落ちた」を見て NVS を疑ってはいけない。** 021 の
+`xQueueSemaphoreTake` の assert も、おそらく同じ溢れの別の被害者。
+
+FreeRTOS のカナリアも末尾ウォッチポイントも**素通りする**
+（`CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY` /
+`..._WATCHPOINT_END_OF_STACK` はどちらも有効）。はみ出しが小さく、
+大きなフレームは見張っている数バイトを飛び越えてしまうため。
+
+手掛かりは自分で作る。`uxTaskGetStackHighWaterMark(NULL)`（ESP-IDF では
+**バイト**を返す）を `handle_key()` の直後で見て、減ったときだけログに出している
+（`main.cpp` の `watch_stack()`）。修正後の実測は **残り 7504B**。
+
+大きいローカルを足すときは ELF でフレームサイズを確かめる:
+
+```bash
+~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-objdump \
+  -d .pio/build/m5stack-cardputer/firmware.elf --disassemble=<関数名> | head -3
+# entry a1, 0x2040   ← この数字が呼び出しの深さぶん積み上がる
+```
+
 ## ビルド・書き込み・実機テスト
 
 ```bash
@@ -207,6 +252,8 @@ assert failed: xQueueSemaphoreTake queue.c:1549 (pxQueue->uxItemSize == 0)
 
 **データの破損ではない。** `esptool erase_region 0x9000 0x5000` で
 NVS を全消去しても再発した。壊れているのはロックオブジェクトのほう。
+**壊した犯人はおそらくスタック溢れ**（前の節を参照。2026-08-17 に同じ形で
+NVS のヒープ上のオブジェクトが潰されているのを実機で確認した）。
 復旧のために置いていた `m5c_nvs_reset()`（`nvs_flash_deinit()` を呼ぶ）を
 疑っているが、確証は取っていない。詳細は
 `~/claude-store/opur/2026-08-15_nvs_panic_investigation.md`。
