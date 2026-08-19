@@ -6,6 +6,26 @@ cannadic / ipadic（natume 同梱、すべて EUC-JP）から (読み, 表記) �
 読み順にソートしたバイナリ辞書 system.dic と統計 stats.txt を出力する。
 
   usage: python3 build_dict.py [--natume DIR] [--out DIR]
+                               [--conj {legacy,cforms}] [--aux {none,min,std}]
+                               [--name FILE]
+
+用言の展開方式は 2 つある。
+
+  --conj legacy  このファイルに手書きした CONJ テーブルで展開する（既定）。
+                 同梱の system.dic はこれで作った。**既定は変えないこと。**
+                 system.dic は git 追跡下にあるので、うっかり別方式で
+                 上書きすると 14MB の差分が出る。
+  --conj cforms  ipadic-2.7.0/cforms.cha（活用型 × 活用形の語尾テーブル）を
+                 読んで展開する。legacy より形態が多く、**活用形名が取れる**ので
+                 --aux で付属語を繋げられる。
+
+  --aux none     付属語を繋がない（既定）
+  --aux min      た / て / ます / ない だけ
+  --aux std      助動詞・接続助詞をひととおり（AUX_STD を参照）
+
+別方式で作るときは --name で出力名を変えること:
+
+  python3 build_dict.py --conj cforms --aux std --name system_conj.dic
 """
 
 import argparse
@@ -136,6 +156,218 @@ def is_no_expand(name):
     return (name == "不変化型"
             or name.startswith("特殊・")
             or name.startswith("文語・"))
+
+
+# ---------------------------------------------------------------------------
+# cforms.cha 方式（--conj cforms）
+# ---------------------------------------------------------------------------
+#
+# ipadic-2.7.0/cforms.cha は活用型 × 活用形の語尾テーブル。
+# 表記語尾と読み語尾が別カラムで揃っているので、カ変「来る」のように
+# 読みと表記がずれる型もそのまま扱える。
+#
+#   (五段・カ行イ音便
+#       (  (基本形 く ク) (未然形 か カ) (連用形 き キ)
+#          (連用タ接続 い イ) (仮定形 け ケ) … ))
+#
+# 上の手書き CONJ との違いは 2 つ。
+#   - 形態が多い（72 活用型 / 478 形態。手書きは 1 型あたり 5〜6 語尾）
+#   - **活用形名が取れる**。「言っ」が連用タ接続だと分かるので、
+#     そこにだけ「た」を繋げられる。付属語連接はこれが前提。
+
+def parse_sexp(text):
+    """cforms.cha 用の最小 S 式パーサ。`;` から行末まではコメント。"""
+    text = re.sub(r";[^\n]*", " ", text)
+    stack = [[]]
+    for tok in re.findall(r"\(|\)|[^\s()]+", text):
+        if tok == "(":
+            stack.append([])
+        elif tok == ")":
+            node = stack.pop()
+            stack[-1].append(node)
+        else:
+            stack[-1].append(tok)
+    return stack[0]
+
+
+# cforms.cha は「語尾が無い」ことを `*` で書く（一段の `(未然形 *)` など）。
+# そのまま連結すると「食べ*」のようなゴミになるので空文字に潰す。
+def _star(x):
+    return "" if x == "*" else x
+
+
+# 語幹そのものが未然形・連用形になる型は、cforms.cha にその行すら無いことがある
+# （一段・得ル / 一段・ル など）。空語尾で補う。
+_STEM_IS_FORM = ("一段", "下二", "上二")
+
+# cforms.cha の取りこぼしを補う。手書き CONJ にはあった形なので、
+# 補わないと legacy より候補が減ってしまう。
+#   サ変・−スル(398 語) / サ変・−ズル(122 語) は連用形の行が無い。
+#   「察し」「感じ」が作れず、連用タ接続のフォールバック元も消える。
+#   サ変・−スル は未然レル接続が「せ」だけで「さ」が無い。286 語ぶんの
+#   「愛さ」「察さ」が消え、受身・使役（愛される／愛させる）も作れない。
+#   サ変・−ズル と 一段・得ル は命令形の行が無い（感じろ／得よ）。
+#
+# 逆に、legacy にあって cforms に無くても**補わない**ものもある:
+#   五段・ラ行特殊の連用形「り」（13 語）… cforms は「い」。
+#     「いらっしゃります」ではなく「いらっしゃいます」が正しいので cforms が正しい
+#   四段のオ段「ほ/と/そ/ぼ」（15 語）… 文語の未然ウ接続（思はう）。要らない
+_FORM_PATCH = {
+    "サ変・−スル": [("連用形", "し", "し"),
+                    ("未然レル接続", "さ", "さ")],
+    "サ変・−ズル": [("連用形", "じ", "じ"),
+                    ("命令ｒｏ", "じろ", "じろ"),
+                    ("命令ｙｏ", "じよ", "じよ")],
+    "一段・得ル":   [("命令ｙｏ", "よ", "よ"),
+                    ("命令ｒｏ", "ろ", "ろ")],
+}
+
+# 連用タ接続の行が無い型は連用形で代用する。
+#   五段・サ行  し + た  → 話した   ✓
+#   一段        （空）+ た → 食べた  ✓
+#   サ変・スル  し + た  → した     ✓
+# ただし「ゆく」だけは連用形（き）では「ゆきた」になってしまう。
+# ipadic 自身が型名を促音便と呼んでいるので、手書き CONJ と同じ「っ」を充てる。
+_TA_OVERRIDE = {"五段・カ行促音便ユク": ("っ", "っ")}
+
+
+def load_cforms(path):
+    """cforms.cha を読む。{活用型: [(活用形名, 表記語尾, 読み語尾)]}"""
+    with open(path, "rb") as f:
+        text = f.read().decode(SRC_ENCODING, errors="replace")
+
+    table = {}
+    for node in parse_sexp(text):
+        if not isinstance(node, list) or len(node) < 2:
+            continue
+        rows = []
+        for group in node[1:]:
+            if not isinstance(group, list):
+                continue
+            for row in group:
+                # 4 カラムの行（特殊・ナイ の音便基本形など）は 4 つ目が発音。使わない。
+                if isinstance(row, list) and len(row) >= 3:
+                    rows.append((row[0], _star(row[1]), _star(kata_to_hira(row[2]))))
+                elif isinstance(row, list) and len(row) == 2:
+                    # `(未然形 *)` のように 1 カラムしか無い行。語尾が空という意味。
+                    rows.append((row[0], _star(row[1]), _star(row[1])))
+        if rows:
+            table[node[0]] = rows
+
+    for name, rows in table.items():
+        have = set(r[0] for r in rows)
+        # 同じ活用形名で別の語尾が既にあることがある（サ変・−スルの未然レル接続は
+        # 「せ」がある）ので、名前だけでなく語尾込みで重複を見る。
+        for patch in _FORM_PATCH.get(name, ()):
+            if patch not in rows:
+                rows.append(patch)
+        have = set(r[0] for r in rows)
+        if name.startswith(_STEM_IS_FORM):
+            for f in ("未然形", "連用形"):
+                if f not in have:
+                    rows.append((f, "", ""))
+            have = set(r[0] for r in rows)
+        if "連用タ接続" not in have:
+            ov = _TA_OVERRIDE.get(name)
+            if ov:
+                rows.append(("連用タ接続", ov[0], ov[1]))
+            else:
+                for f, fs, fr in list(rows):
+                    if f == "連用形":
+                        rows.append(("連用タ接続", fs, fr))
+
+    return table
+
+
+# ---------------------------------------------------------------------------
+# 付属語連接テーブル（--aux）
+# ---------------------------------------------------------------------------
+#
+# 活用形名をキーに、その形に繋がる付属語（助動詞・接続助詞）を並べる。
+# 「言った」が引けないのはここが無かったからで、案A の本体はこの表。
+
+# 連用タ接続に「だ/で」が付く型（撥音便・イ音便のうち濁るもの）。
+#   読んだ・飛んで・泳いだ。「い」でもガ行だけは濁る。
+VOICED_CONJ = ("五段・ガ行", "五段・ナ行", "五段・バ行", "五段・マ行")
+
+# 受身・使役。五段は れる/せる、一段系は られる/させる。
+# サ変は未然レル接続（さ）が別にあるので未然形には付けない。
+_ICHIDAN_LIKE = ("一段", "下二", "上二", "カ変")
+
+AUX_MIN = {
+    "連用タ接続": ["た", "て"],
+    "連用形":     ["ます"],
+    "未然形":     ["ない"],
+}
+
+AUX_STD = {
+    "連用タ接続":     ["た", "たら", "たり", "て", "ても", "てる", "ている",
+                       "てください"],
+    "連用テ接続":     ["て", "ても"],          # 形容詞の「高くて」
+    "連用形":         ["ます", "ました", "ません", "まして", "ましょう",
+                       "たい", "たく", "たかった", "ながら", "そう"],
+    "未然形":         ["ない", "なかった", "なく", "なくて"],
+    "未然レル接続":   ["れる", "れた", "せる", "せた"],   # サ変の される/させる
+    "未然ヌ接続":     ["ぬ", "ん"],
+    "未然ウ接続":     ["う"],
+    "仮定形":         ["ば"],
+}
+
+# 濁音便のとき「た」→「だ」に振り替える対応。
+_VOICE = {"た": "だ", "たら": "だら", "たり": "だり", "て": "で", "ても": "でも",
+          "てる": "でる", "ている": "でいる", "てください": "でください"}
+
+
+def aux_suffixes(form, conj, level):
+    """活用形 form（活用型 conj）に繋げる付属語のリスト。"""
+    if level == "none":
+        return []
+    table = AUX_MIN if level == "min" else AUX_STD
+    out = list(table.get(form, ()))
+
+    if level == "std" and form == "未然形":
+        if conj.startswith(_ICHIDAN_LIKE):
+            out += ["られる", "られた", "させる", "させた"]
+        elif conj.startswith(("五段", "四段")):
+            out += ["ず", "れる", "れた", "せる", "せた"]
+
+    if form == "連用タ接続" and conj in VOICED_CONJ:
+        out = [_VOICE.get(a, a) for a in out]
+    return out
+
+
+def expand_cforms(reading, surface, conj, cforms, level, stats):
+    """cforms.cha に従って展開し、付属語も繋ぐ。[(読み, 表記)] を返す。"""
+    rows = cforms.get(conj)
+    if rows is None or is_no_expand(conj):
+        if is_no_expand(conj):
+            stats["conj_no_expand"][conj] += 1
+        elif conj:
+            stats["conj_unknown"][conj] += 1
+        return [(reading, surface)]
+
+    # 語幹 = 見出し語 － 基本形の語尾。ipadic 16,512 語すべてで剥がせることを確認済み。
+    base = [r for r in rows if r[0] == "基本形"]
+    if not base:
+        stats["cforms_no_base"][conj] += 1
+        return [(reading, surface)]
+    _, b_s, b_r = base[0]
+    if not surface.endswith(b_s) or not reading.endswith(b_r):
+        stats["cforms_stem_mismatch"][conj] += 1
+        return [(reading, surface)]
+
+    s_stem = surface[:len(surface) - len(b_s)] if b_s else surface
+    r_stem = reading[:len(reading) - len(b_r)] if b_r else reading
+
+    out = []
+    for fname, f_s, f_r in rows:
+        out.append((r_stem + f_r, s_stem + f_s))
+        stats["form_counts"][fname] += 1
+        for a in aux_suffixes(fname, conj, level):
+            out.append((r_stem + f_r + a, s_stem + f_s + a))
+            stats["aux_counts"][a] += 1
+    stats["conj_expanded"] += 1
+    return out
 
 # ---------------------------------------------------------------------------
 # 収集器
@@ -286,7 +518,11 @@ def expand_conj(reading, surface, conj_name, stats):
     return out
 
 
-def parse_ipadic(path, source, col, stats):
+def parse_ipadic(path, source, col, stats, expander=None):
+    """expander は (読み, 表記, 活用型, stats) -> [(読み, 表記)]。
+    省略時は手書き CONJ テーブルの expand_conj。"""
+    if expander is None:
+        expander = expand_conj
     for line in read_lines(path):
         line = line.strip()
         if not line:
@@ -301,7 +537,7 @@ def parse_ipadic(path, source, col, stats):
         conj = m_c.group(1) if m_c else ""
 
         if conj:
-            for r, s in expand_conj(reading, surface, conj, stats):
+            for r, s in expander(reading, surface, conj, stats):
                 col.add(r, s, source)
         else:
             col.add(reading, surface, source)
@@ -356,7 +592,8 @@ def write_dic(path, entries):
 # 統計
 # ---------------------------------------------------------------------------
 
-def write_stats(path, entries, by_source, dropped, dup_removed, sizes, stats):
+def write_stats(path, entries, by_source, dropped, dup_removed, sizes, stats,
+                args=None):
     total_size, body_size, table_size = sizes
 
     len_dist = Counter(len(r) for r, _ in entries)
@@ -374,6 +611,12 @@ def write_stats(path, entries, by_source, dropped, dup_removed, sizes, stats):
 
     ap("=== M5OpurSan system.dic 統計 ===")
     ap("")
+    if args is not None:
+        ap("--- ビルド設定 ---")
+        ap("出力ファイル           : {}".format(args.name))
+        ap("用言の展開方式         : --conj {}".format(args.conj))
+        ap("付属語連接             : --aux {}".format(args.aux))
+        ap("")
     ap("--- 全体 ---")
     ap("総エントリ数           : {:,}".format(len(entries)))
     ap("ファイルサイズ         : {:,} bytes ({:.2f} MB)".format(
@@ -404,6 +647,26 @@ def write_stats(path, entries, by_source, dropped, dup_removed, sizes, stats):
     ap("  gt_okuri フォールバック  : {:,}".format(stats["okuri_fallback"]))
     ap("  ipadic 活用展開した語    : {:,}".format(stats["conj_expanded"]))
     ap("  ipadic 語幹不足でスキップ: {:,}".format(stats["conj_too_short"]))
+    if stats.get("cforms_stem_mismatch"):
+        ap("  ★語幹を剥がせなかった語（基本形の語尾で終わっていない）:")
+        for name, n in stats["cforms_stem_mismatch"].most_common():
+            ap("    {:<26} {:>9,}".format(name, n))
+    if stats.get("cforms_no_base"):
+        ap("  ★cforms に基本形の行が無い活用型:")
+        for name, n in stats["cforms_no_base"].most_common():
+            ap("    {:<26} {:>9,}".format(name, n))
+    if stats.get("form_counts"):
+        ap("")
+        ap("--- 活用形ごとの生成数（cforms 方式・重複除去前）---")
+        for name, n in stats["form_counts"].most_common():
+            ap("  {:<26} {:>9,}".format(name, n))
+    if stats.get("aux_counts"):
+        ap("")
+        ap("--- 付属語ごとの生成数（重複除去前・計 {:,}）---".format(
+            sum(stats["aux_counts"].values())))
+        for name, n in stats["aux_counts"].most_common():
+            ap("  {:<26} {:>9,}".format(name, n))
+        ap("")
     if stats["conj_no_expand"]:
         n_tot = sum(stats["conj_no_expand"].values())
         ap("  展開しない活用型（助動詞・文語・不変化型、計 {:,} 語）:".format(n_tot))
@@ -455,7 +718,17 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap.add_argument("--natume", default=os.path.join(here, "natume"))
     ap.add_argument("--out", default=os.path.join(here, "output"))
+    ap.add_argument("--conj", choices=("legacy", "cforms"), default="legacy",
+                    help="用言の展開方式（既定 legacy = 同梱 system.dic と同じ）")
+    ap.add_argument("--aux", choices=("none", "min", "std"), default="none",
+                    help="付属語連接の量。--conj cforms のときだけ効く")
+    ap.add_argument("--name", default="system.dic",
+                    help="出力ファイル名。統計は <ベース名>_stats.txt")
     args = ap.parse_args()
+
+    if args.aux != "none" and args.conj != "cforms":
+        sys.exit("--aux は --conj cforms とセットで使うこと"
+                 "（legacy は活用形名を持たないので付属語を繋げない）")
 
     cannadir = os.path.join(args.natume, "alt-cannadic-110208")
     ipadir = os.path.join(args.natume, "ipadic-2.7.0")
@@ -476,7 +749,24 @@ def main():
         "conj_too_short": 0,
         "conj_unknown": Counter(),
         "conj_no_expand": Counter(),
+        "cforms_no_base": Counter(),
+        "cforms_stem_mismatch": Counter(),
+        "form_counts": Counter(),
+        "aux_counts": Counter(),
     }
+
+    expander = None
+    if args.conj == "cforms":
+        cf_path = os.path.join(ipadir, "cforms.cha")
+        if not os.path.isfile(cf_path):
+            sys.exit("cforms.cha が見つからない: {}".format(cf_path))
+        cforms = load_cforms(cf_path)
+        print("      cforms.cha: {} 活用型 / {} 形態".format(
+            len(cforms), sum(len(v) for v in cforms.values())), file=sys.stderr)
+
+        def expander(reading, surface, conj, st,
+                     _cf=cforms, _lv=args.aux):
+            return expand_cforms(reading, surface, conj, _cf, _lv, st)
 
     # --- Step 1: 素材読み込み ---
     print("[1/5] 素材を読み込み中…", file=sys.stderr)
@@ -492,7 +782,7 @@ def main():
         if not fname.endswith(".dic"):
             continue
         src = "ipadic/" + fname[:-4]
-        parse_ipadic(os.path.join(ipadir, fname), src, col, stats)
+        parse_ipadic(os.path.join(ipadir, fname), src, col, stats, expander)
     n_ipa = sum(v for k, v in col.by_source.items() if k.startswith("ipadic/"))
     print("      {:<14} {:>9,}".format("ipadic/*.dic", n_ipa), file=sys.stderr)
 
@@ -523,17 +813,20 @@ def main():
     entries.sort(key=lambda e: e[0].encode("utf-8"))
 
     # --- Step 4: バイナリ出力 ---
-    dic_path = os.path.join(args.out, "system.dic")
+    dic_path = os.path.join(args.out, args.name)
     print("[4/5] {} を書き出し中…".format(dic_path), file=sys.stderr)
     sizes = write_dic(dic_path, entries)
     print("      {:,} bytes ({:.2f} MB)".format(sizes[0], sizes[0] / 1024 / 1024),
           file=sys.stderr)
 
     # --- Step 5: 統計 ---
-    stats_path = os.path.join(args.out, "stats.txt")
+    base = os.path.splitext(args.name)[0]
+    stats_path = os.path.join(args.out,
+                              "stats.txt" if base == "system"
+                              else base + "_stats.txt")
     print("[5/5] {} を書き出し中…".format(stats_path), file=sys.stderr)
     write_stats(stats_path, entries, col.by_source, col.dropped,
-                dup_removed, sizes, stats)
+                dup_removed, sizes, stats, args)
 
     print("完了: {:,} エントリ".format(len(entries)), file=sys.stderr)
 
