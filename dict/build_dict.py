@@ -11,21 +11,24 @@ cannadic / ipadic（natume 同梱、すべて EUC-JP）から (読み, 表記) �
 
 用言の展開方式は 2 つある。
 
-  --conj legacy  このファイルに手書きした CONJ テーブルで展開する（既定）。
-                 同梱の system.dic はこれで作った。**既定は変えないこと。**
-                 system.dic は git 追跡下にあるので、うっかり別方式で
-                 上書きすると 14MB の差分が出る。
   --conj cforms  ipadic-2.7.0/cforms.cha（活用型 × 活用形の語尾テーブル）を
-                 読んで展開する。legacy より形態が多く、**活用形名が取れる**ので
-                 --aux で付属語を繋げられる。
+                 読んで展開する（既定）。**活用形名が取れる**ので --aux で
+                 付属語を繋げられる。同梱の system.dic はこれで作った。
+  --conj legacy  このファイルに手書きした CONJ テーブルで展開する。
+                 活用語尾までしか作れないので「いった → 言った」は引けない。
+                 021 までの同梱辞書がこれ。比較用に残してある。
 
-  --aux none     付属語を繋がない（既定）
+  --aux std      助動詞・接続助詞をひととおり繋ぐ（AUX_STD を参照）
   --aux min      た / て / ます / ない だけ
-  --aux std      助動詞・接続助詞をひととおり（AUX_STD を参照）
+  --aux none     付属語を繋がない
 
+  既定は --conj cforms なら std、--conj legacy なら none（legacy は活用形名を
+  持たないので付属語を繋げない）。
+
+system.dic は git 追跡下にあるので、**既定を変えると 35MB の差分が出る。**
 別方式で作るときは --name で出力名を変えること:
 
-  python3 build_dict.py --conj cforms --aux std --name system_conj.dic
+  python3 build_dict.py --conj legacy --name system_legacy.dic
 """
 
 import argparse
@@ -718,14 +721,17 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap.add_argument("--natume", default=os.path.join(here, "natume"))
     ap.add_argument("--out", default=os.path.join(here, "output"))
-    ap.add_argument("--conj", choices=("legacy", "cforms"), default="legacy",
-                    help="用言の展開方式（既定 legacy = 同梱 system.dic と同じ）")
-    ap.add_argument("--aux", choices=("none", "min", "std"), default="none",
-                    help="付属語連接の量。--conj cforms のときだけ効く")
+    ap.add_argument("--conj", choices=("legacy", "cforms"), default="cforms",
+                    help="用言の展開方式（既定 cforms = 同梱 system.dic と同じ）")
+    ap.add_argument("--aux", choices=("none", "min", "std"), default=None,
+                    help="付属語連接の量。--conj cforms のときだけ効く"
+                         "（既定 cforms:std / legacy:none）")
     ap.add_argument("--name", default="system.dic",
                     help="出力ファイル名。統計は <ベース名>_stats.txt")
     args = ap.parse_args()
 
+    if args.aux is None:
+        args.aux = "std" if args.conj == "cforms" else "none"
     if args.aux != "none" and args.conj != "cforms":
         sys.exit("--aux は --conj cforms とセットで使うこと"
                  "（legacy は活用形名を持たないので付属語を繋げない）")

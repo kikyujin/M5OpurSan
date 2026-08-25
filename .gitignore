@@ -19,9 +19,9 @@ opur_editor/test_dict
 # system.dic は同梱するので追跡する（make build-dict で再生成もできる）
 dict/natume/
 dict/output/stats.txt
-# 活用展開版（build-dict-conj）。34MB あるので追跡しない
-dict/output/system_conj.dic
-dict/output/system_conj_stats.txt
+# 旧方式の比較用ビルド（build-dict-legacy）。同梱するのは system.dic だけ
+dict/output/system_legacy.dic
+dict/output/system_legacy_stats.txt
 
 # 公開しないもの
 # .claude/          ローカルの権限設定。絶対パス等の環境情報が残る
